@@ -5,15 +5,13 @@ on:
     branches: [ main, master, develop ]
   pull_request:
     branches: [ main, master ]
-  workflow_dispatch:  # Allow manual trigger
+  workflow_dispatch:
 
 env:
   VPS_IP: ${{ secrets.VPS_IP }}
   VPS_USER: ${{ secrets.VPS_USER }}
   VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
   DEPLOY_PATH: /var/www/html
-  NODE_VERSION: '18'
-  PYTHON_VERSION: '3.10'
 
 jobs:
   test-and-deploy:
@@ -29,26 +27,21 @@ jobs:
         echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/id_rsa
         chmod 600 ~/.ssh/id_rsa
         ssh-keyscan -H ${{ secrets.VPS_IP }} >> ~/.ssh/known_hosts
-        echo "SSH setup complete"
 
     - name: Test SSH Connection
       run: |
-        ssh -i ~/.ssh/id_rsa ${{ secrets.VPS_USER }}@${{ secrets.VPS_IP }} "echo '✓ SSH connection successful' && hostname && date"
-        echo "✅ VPS connection verified"
+        ssh -i ~/.ssh/id_rsa ${{ secrets.VPS_USER }}@${{ secrets.VPS_IP }} "echo 'SSH connection successful'"
 
     - name: Prepare VPS Directory
       run: |
-        ssh -i ~/.ssh/id_rsa ${{ secrets.VPS_USER }}@${{ secrets.VPS_IP }} << 'EOF'
-          echo "📁 Preparing deployment directory..."
-          sudo mkdir -p ${{ env.DEPLOY_PATH }}
-          sudo chown -R $USER:$USER ${{ env.DEPLOY_PATH }}
+        ssh -i ~/.ssh/id_rsa ${{ secrets.VPS_USER }}@${{ secrets.VPS_IP }} "
+          sudo mkdir -p ${{ env.DEPLOY_PATH }} &&
+          sudo chown -R \$USER:\$USER ${{ env.DEPLOY_PATH }} &&
           sudo chmod -R 755 ${{ env.DEPLOY_PATH }}
-          echo "✅ Directory ready: ${{ env.DEPLOY_PATH }}"
-        EOF
+        "
 
     - name: Deploy Files to VPS
       run: |
-        echo "📂 Copying files to VPS..."
         rsync -avz --delete -e "ssh -i ~/.ssh/id_rsa" \
           --exclude '.git' \
           --exclude '.github' \
@@ -56,70 +49,48 @@ jobs:
           --exclude 'vendor' \
           --exclude '.env' \
           --exclude '*.log' \
-          --exclude 'tests' \
-          --exclude 'README.md' \
           ./ ${{ secrets.VPS_USER }}@${{ secrets.VPS_IP }}:${{ env.DEPLOY_PATH }}/
-        echo "✅ Files deployed successfully"
 
-    - name: Configure VPS Environment
+    - name: Install Dependencies
       run: |
-        ssh -i ~/.ssh/id_rsa ${{ secrets.VPS_USER }}@${{ secrets.VPS_IP }} << 'EOF'
-          echo "🔧 Configuring VPS environment..."
+        ssh -i ~/.ssh/id_rsa ${{ secrets.VPS_USER }}@${{ secrets.VPS_IP }} "
+          cd ${{ env.DEPLOY_PATH }} &&
           
-          # Detect project type and install dependencies
-          cd ${{ env.DEPLOY_PATH }}
-          
-          # Node.js application
-          if [ -f "package.json" ]; then
-            echo "📦 Node.js project detected"
-            if ! command -v node &> /dev/null; then
-              curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
-              sudo apt-get install -y nodejs
-            fi
+          # Node.js
+          if [ -f package.json ]; then
+            curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash - &&
+            sudo apt-get install -y nodejs &&
             npm ci --only=production
-            echo "✅ Node.js dependencies installed"
-          fi
+          fi &&
           
-          # Python application
-          if [ -f "requirements.txt" ]; then
-            echo "🐍 Python project detected"
-            sudo apt-get update
-            sudo apt-get install -y python3-pip python3-venv
-            python3 -m venv venv
-            source venv/bin/activate
+          # Python
+          if [ -f requirements.txt ]; then
+            sudo apt-get update &&
+            sudo apt-get install -y python3-pip python3-venv &&
+            python3 -m venv venv &&
+            source venv/bin/activate &&
             pip install -r requirements.txt
-            echo "✅ Python dependencies installed"
-          fi
+          fi &&
           
-          # PHP application
-          if [ -f "composer.json" ]; then
-            echo "🐘 PHP project detected"
-            sudo apt-get update
-            sudo apt-get install -y php8.1 php8.1-cli php8.1-fpm php8.1-mysql composer
+          # PHP
+          if [ -f composer.json ]; then
+            sudo apt-get update &&
+            sudo apt-get install -y php8.1 php8.1-cli php8.1-fpm php8.1-mysql composer &&
             composer install --no-dev --optimize-autoloader
-            echo "✅ PHP dependencies installed"
           fi
-          
-          # Set proper permissions
-          sudo chown -R www-data:www-data ${{ env.DEPLOY_PATH }} 2>/dev/null || true
-          sudo chmod -R 755 ${{ env.DEPLOY_PATH }}
-          
-          echo "✅ Environment configured"
-        EOF
+        "
 
-    - name: Setup and Configure Services
+    - name: Configure Nginx
       run: |
-        ssh -i ~/.ssh/id_rsa ${{ secrets.VPS_USER }}@${{ secrets.VPS_IP }} << 'EOF'
-          echo "🚀 Setting up services..."
-          
-          # Install and configure Nginx if not present
+        ssh -i ~/.ssh/id_rsa ${{ secrets.VPS_USER }}@${{ secrets.VPS_IP }} "
+          # Install Nginx if not present
           if ! command -v nginx &> /dev/null; then
-            sudo apt-get update
+            sudo apt-get update &&
             sudo apt-get install -y nginx
-          fi
+          fi &&
           
-          # Create Nginx configuration
-          sudo tee /etc/nginx/sites-available/${{ env.DEPLOY_PATH }} << 'NGINX_CONF'
+          # Create Nginx config
+          sudo tee /etc/nginx/sites-available/myapp > /dev/null <<'NGINX_CONF'
 server {
     listen 80;
     server_name _;
@@ -127,161 +98,100 @@ server {
     index index.html index.htm index.php;
     
     location / {
-        try_files $uri $uri/ /index.html;
+        try_files \$uri \$uri/ /index.html;
     }
     
-    location ~ \.php$ {
+    location ~ \.php\$ {
         include snippets/fastcgi-php.conf;
         fastcgi_pass unix:/var/run/php/php8.1-fpm.sock;
     }
-    
-    location ~ /\.ht {
-        deny all;
-    }
 }
 NGINX_CONF
-
+          
           # Enable site
-          sudo ln -sf /etc/nginx/sites-available/${{ env.DEPLOY_PATH }} /etc/nginx/sites-enabled/
-          sudo rm -f /etc/nginx/sites-enabled/default
-          
-          # Test and reload Nginx
-          sudo nginx -t && sudo systemctl reload nginx
-          
-          echo "✅ Services configured"
-        EOF
+          sudo ln -sf /etc/nginx/sites-available/myapp /etc/nginx/sites-enabled/ &&
+          sudo rm -f /etc/nginx/sites-enabled/default &&
+          sudo nginx -t &&
+          sudo systemctl reload nginx
+        "
 
     - name: Start Application
       run: |
-        ssh -i ~/.ssh/id_rsa ${{ secrets.VPS_USER }}@${{ secrets.VPS_IP }} << 'EOF'
-          echo "▶️ Starting application..."
-          cd ${{ env.DEPLOY_PATH }}
+        ssh -i ~/.ssh/id_rsa ${{ secrets.VPS_USER }}@${{ secrets.VPS_IP }} "
+          cd ${{ env.DEPLOY_PATH }} &&
           
-          # Start Node.js app with PM2
-          if [ -f "package.json" ]; then
+          # Start Node.js app
+          if [ -f package.json ]; then
             if ! command -v pm2 &> /dev/null; then
               sudo npm install -g pm2
-            fi
+            fi &&
             
-            # Check for main entry file
-            if [ -f "server.js" ]; then
-              pm2 delete server 2>/dev/null || true
-              pm2 start server.js --name "myapp"
-            elif [ -f "app.js" ]; then
-              pm2 delete app 2>/dev/null || true
-              pm2 start app.js --name "myapp"
-            elif [ -f "index.js" ]; then
-              pm2 delete index 2>/dev/null || true
-              pm2 start index.js --name "myapp"
-            fi
+            if [ -f server.js ]; then
+              pm2 delete server 2>/dev/null || true &&
+              pm2 start server.js --name 'myapp'
+            elif [ -f app.js ]; then
+              pm2 delete app 2>/dev/null || true &&
+              pm2 start app.js --name 'myapp'
+            elif [ -f index.js ]; then
+              pm2 delete index 2>/dev/null || true &&
+              pm2 start index.js --name 'myapp'
+            fi &&
             
-            pm2 save
-            sudo env PATH=$PATH:/usr/bin pm2 startup systemd -u $USER --hp /home/$USER
-            echo "✅ Node.js application started"
+            pm2 save &&
+            sudo env PATH=\$PATH:/usr/bin pm2 startup systemd -u \$USER --hp /home/\$USER
           fi
-          
-          # Start Python app with systemd
-          if [ -f "app.py" ] || [ -f "wsgi.py" ]; then
-            sudo tee /etc/systemd/system/myapp.service << 'SERVICE'
-[Unit]
-Description=My Python Application
-After=network.target
+        "
 
-[Service]
-User=$USER
-WorkingDirectory=${{ env.DEPLOY_PATH }}
-ExecStart=${{ env.DEPLOY_PATH }}/venv/bin/gunicorn --workers 3 --bind 0.0.0.0:8000 app:app
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-SERVICE
-            sudo systemctl daemon-reload
-            sudo systemctl enable myapp
-            sudo systemctl restart myapp
-            echo "✅ Python application started"
-          fi
-          
-          echo "✅ Application started successfully"
-        EOF
-
-    - name: Configure Firewall (Ports 1-67890)
+    - name: Configure Firewall
       run: |
-        ssh -i ~/.ssh/id_rsa ${{ secrets.VPS_USER }}@${{ secrets.VPS_IP }} << 'EOF'
-          echo "🔥 Configuring firewall for ports 1-67890..."
-          
-          # Check if UFW is installed
+        ssh -i ~/.ssh/id_rsa ${{ secrets.VPS_USER }}@${{ secrets.VPS_IP }} "
+          # Install UFW if not present
           if ! command -v ufw &> /dev/null; then
-            sudo apt-get update
+            sudo apt-get update &&
             sudo apt-get install -y ufw
-          fi
+          fi &&
           
-          # Reset UFW to default
-          sudo ufw --force reset
+          # Reset and configure UFW
+          sudo ufw --force reset &&
+          sudo ufw default deny incoming &&
+          sudo ufw default allow outgoing &&
           
-          # Set default policies
-          sudo ufw default deny incoming
-          sudo ufw default allow outgoing
-          
-          # Allow SSH (important!)
-          sudo ufw allow 22/tcp comment 'SSH'
+          # Allow SSH
+          sudo ufw allow 22/tcp &&
           
           # Allow all ports from 1 to 67890
-          sudo ufw allow 1:67890/tcp
-          sudo ufw allow 1:67890/udp
+          sudo ufw allow 1:67890/tcp &&
+          sudo ufw allow 1:67890/udp &&
           
-          # Allow common web ports explicitly
-          sudo ufw allow 80/tcp comment 'HTTP'
-          sudo ufw allow 443/tcp comment 'HTTPS'
-          sudo ufw allow 3000/tcp comment 'Node.js'
-          sudo ufw allow 8000/tcp comment 'Python'
-          sudo ufw allow 8080/tcp comment 'Alternative HTTP'
+          # Allow common web ports
+          sudo ufw allow 80/tcp &&
+          sudo ufw allow 443/tcp &&
+          sudo ufw allow 3000/tcp &&
+          sudo ufw allow 8000/tcp &&
+          sudo ufw allow 8080/tcp &&
           
-          # Enable UFW (non-interactive)
-          echo "y" | sudo ufw enable
-          
-          # Show status
+          # Enable UFW
+          echo 'y' | sudo ufw enable &&
           sudo ufw status verbose
-          
-          echo "✅ Firewall configured with ports 1-67890 open"
-        EOF
+        "
 
     - name: Verify Deployment
       run: |
-        echo "🔍 Verifying deployment..."
-        
-        # Wait for services to start
-        sleep 10
-        
-        # Test HTTP connection
-        ssh -i ~/.ssh/id_rsa ${{ secrets.VPS_USER }}@${{ secrets.VPS_IP }} << 'EOF'
-          echo "Testing local services..."
-          curl -I http://localhost 2>/dev/null | head -n 1 || echo "⚠️ Web server not responding on port 80"
-          curl -I http://localhost:3000 2>/dev/null | head -n 1 || echo "⚠️ Node.js not responding on port 3000"
-          curl -I http://localhost:8000 2>/dev/null | head -n 1 || echo "⚠️ Python not responding on port 8000"
-          
-          # Check if services are running
-          echo ""
-          echo "📊 Service Status:"
-          systemctl status nginx --no-pager -l | grep "Active:" || true
-          systemctl status myapp --no-pager -l 2>/dev/null | grep "Active:" || true
-          pm2 list 2>/dev/null | grep "myapp" || true
-        EOF
-        
-        echo "✅ Deployment verification complete"
+        ssh -i ~/.ssh/id_rsa ${{ secrets.VPS_USER }}@${{ secrets.VPS_IP }} "
+          echo 'Testing services...' &&
+          curl -I http://localhost 2>/dev/null | head -n 1 || echo 'Web server not responding' &&
+          curl -I http://localhost:3000 2>/dev/null | head -n 1 || echo 'Node.js not responding' &&
+          echo 'Deployment verification complete'
+        "
 
     - name: Deployment Summary
       if: always()
       run: |
-        echo "🎉 Deployment process completed!"
         echo "==================== DEPLOYMENT SUMMARY ===================="
         echo "✅ VPS: ${{ secrets.VPS_IP }}"
         echo "✅ User: ${{ secrets.VPS_USER }}"
         echo "✅ Path: ${{ env.DEPLOY_PATH }}"
         echo "✅ Firewall: Ports 1-67890 open"
         echo ""
-        echo "📱 Access your application at:"
-        echo "   http://${{ secrets.VPS_IP }}"
-        echo "   http://${{ secrets.VPS_IP }}:3000 (Node.js)"
-        echo "   http://${{ secrets.VPS_IP }}:8000 (Python)"
+        echo "📱 Access your application at: http://${{ secrets.VPS_IP }}"
         echo "============================================================"
