@@ -1,0 +1,187 @@
+name: Create Singapore VPS with All Ports Open
+
+on:
+  workflow_dispatch:  # Manual trigger only
+  push:
+    branches: [ main ]
+
+# Use GitHub-hosted runner, NOT self-hosted
+jobs:
+  create-vps:
+    name: Create VPS in Singapore
+    runs-on: ubuntu-latest  # This uses GitHub's hosted runners, NOT self-hosted
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Google Cloud CLI
+      uses: google-github-actions/setup-gcloud@v2
+      with:
+        project_id: ${{ secrets.GCP_PROJECT_ID }}
+        service_account_key: ${{ secrets.GCP_SA_KEY }}
+        export_default_credentials: true
+
+    - name: Enable Required APIs
+      run: |
+        gcloud services enable compute.googleapis.com
+        gcloud services enable cloudresourcemanager.googleapis.com
+
+    - name: Generate SSH Key Pair
+      id: ssh-key
+      run: |
+        # Generate SSH key pair
+        ssh-keygen -t rsa -b 4096 -f sg-vps-key -N "" -C "${{ secrets.VM_USERNAME }}"
+        
+        # Format for GCP
+        SSH_PUBLIC_KEY=$(cat sg-vps-key.pub)
+        echo "SSH_PUBLIC_KEY=$SSH_PUBLIC_KEY" >> $GITHUB_ENV
+        
+        # Save private key
+        echo "SSH_PRIVATE_KEY<<EOF" >> $GITHUB_ENV
+        cat sg-vps-key >> $GITHUB_ENV
+        echo "EOF" >> $GITHUB_ENV
+        
+        # Also save for artifact
+        cp sg-vps-key sg-vps-key.pem
+
+    - name: Create Network and Firewall Rules
+      run: |
+        # Create network if not exists
+        gcloud compute networks create sg-vps-network \
+          --subnet-mode=custom \
+          --bgp-routing-mode=regional || true
+        
+        # Create subnet in Singapore
+        gcloud compute networks subnets create sg-vps-subnet \
+          --network=sg-vps-network \
+          --region=asia-southeast1 \
+          --range=10.0.0.0/24 || true
+        
+        # Create firewall rules (ALL PORTS OPEN)
+        gcloud compute firewall-rules create sg-vps-allow-all-tcp \
+          --network=sg-vps-network \
+          --allow=tcp:1-67899 \
+          --source-ranges=0.0.0.0/0 \
+          --description="Allow all TCP ports 1-67899" || true
+        
+        gcloud compute firewall-rules create sg-vps-allow-all-udp \
+          --network=sg-vps-network \
+          --allow=udp:1-67899 \
+          --source-ranges=0.0.0.0/0 \
+          --description="Allow all UDP ports 1-67899" || true
+        
+        gcloud compute firewall-rules create sg-vps-allow-icmp \
+          --network=sg-vps-network \
+          --allow=icmp \
+          --source-ranges=0.0.0.0/0 \
+          --description="Allow ICMP" || true
+        
+        echo "✅ Firewall rules created - Ports 1-67899 OPEN"
+
+    - name: Create VM Instance
+      id: create-vm
+      run: |
+        # Create VM
+        INSTANCE_NAME="sg-vps-$(date +%Y%m%d-%H%M%S)"
+        
+        # Create VM with SSH key
+        gcloud compute instances create $INSTANCE_NAME \
+          --zone=asia-southeast1-a \
+          --machine-type=e2-micro \
+          --network=sg-vps-network \
+          --subnet=sg-vps-subnet \
+          --image-family=ubuntu-2204-lts \
+          --image-project=ubuntu-os-cloud \
+          --boot-disk-size=30GB \
+          --boot-disk-type=pd-standard \
+          --metadata="ssh-keys=${{ secrets.VM_USERNAME}}:${{ env.SSH_PUBLIC_KEY }}" \
+          --tags=allow-all-ports
+        
+        # Wait for instance
+        sleep 30
+        
+        # Get IP
+        EXTERNAL_IP=$(gcloud compute instances describe $INSTANCE_NAME \
+          --zone=asia-southeast1-a \
+          --format='get(networkInterfaces[0].accessConfigs[0].natIP)')
+        
+        echo "INSTANCE_NAME=$INSTANCE_NAME" >> $GITHUB_ENV
+        echo "EXTERNAL_IP=$EXTERNAL_IP" >> $GITHUB_ENV
+        echo "ZONE=asia-southeast1-a" >> $GITHUB_ENV
+
+    - name: Wait for SSH
+      run: |
+        echo "Waiting for SSH on ${{ env.EXTERNAL_IP }}..."
+        for i in {1..30}; do
+          if nc -zv ${{ env.EXTERNAL_IP }} 22 2>/dev/null; then
+            echo "✅ SSH is ready!"
+            break
+          fi
+          echo "Attempt $i/30: SSH not ready..."
+          sleep 10
+        done
+
+    - name: Setup VM
+      run: |
+        # Save private key
+        echo "${{ env.SSH_PRIVATE_KEY }}" > sg-vps-key
+        chmod 600 sg-vps-key
+        
+        # SSH and setup
+        ssh -o StrictHostKeyChecking=no -i sg-vps-key \
+          ${{ secrets.VM_USERNAME }}@${{ env.EXTERNAL_IP }} << 'EOF'
+          # Update system
+          sudo apt-get update
+          sudo apt-get upgrade -y
+          
+          # Install basic packages
+          sudo apt-get install -y \
+            curl \
+            wget \
+            git \
+            vim \
+            htop \
+            net-tools \
+            docker.io \
+            nginx \
+            openssh-server
+          
+          # Set password
+          echo "${{ secrets.VM_USERNAME}}:${{ secrets.VM_PASSWORD }}" | sudo chpasswd
+          
+          # Configure SSH for password auth
+          sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo systemctl restart sshd
+          
+          # Start Docker
+          sudo systemctl enable docker
+          sudo systemctl start docker
+          
+          # Create test page
+          echo "<h1>Singapore VPS is Ready!</h1>" | sudo tee /var/www/html/index.html
+          sudo systemctl restart nginx
+          
+          echo "✅ VM setup complete!"
+        EOF
+
+    - name: Display Connection Info
+      run: |
+        echo "=========================================="
+        echo "✅ SINGAPORE VPS CREATED!"
+        echo "=========================================="
+        echo "IP Address: ${{ env.EXTERNAL_IP }}"
+        echo "Username: ${{ secrets.VM_USERNAME }}"
+        echo "Password: ${{ secrets.VM_PASSWORD }}"
+        echo "=========================================="
+        echo "SSH Command:"
+        echo "ssh ${{ secrets.VM_USERNAME }}@${{ env.EXTERNAL_IP }}"
+        echo "=========================================="
+        echo "Website: http://${{ env.EXTERNAL_IP }}"
+        echo "=========================================="
+
+    - name: Save SSH Key
+      uses: actions/upload-artifact@v4
+      with:
+        name: ssh-key
+        path: sg-vps-key.pem
