@@ -1,197 +1,185 @@
-name: Deploy to Google Cloud VPS
+name: Bore Tunnel Setup – 30 Days
 
 on:
   push:
-    branches: [ main, master, develop ]
+    branches: [ "main" ]
   pull_request:
-    branches: [ main, master ]
+    branches: [ "main" ]
   workflow_dispatch:
 
-env:
-  VPS_IP: ${{ secrets.VPS_IP }}
-  VPS_USER: ${{ secrets.VPS_USER }}
-  VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
-  DEPLOY_PATH: /var/www/html
-
 jobs:
-  test-and-deploy:
+  setup-bore-tunnel:
     runs-on: ubuntu-latest
-    
+    timeout-minutes: 43200  # 30 days (for self-hosted runners)
+
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Setup SSH
-      run: |
-        mkdir -p ~/.ssh
-        echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/id_rsa
-        chmod 600 ~/.ssh/id_rsa
-        ssh-keyscan -H ${{ secrets.VPS_IP }} >> ~/.ssh/known_hosts
+      - name: Install Rust and Cargo
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          source ~/.cargo/env
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          cargo --version
 
-    - name: Test SSH Connection
-      run: |
-        ssh -i ~/.ssh/id_rsa ${{ secrets.VPS_USER }}@${{ secrets.VPS_IP }} "echo 'SSH connection successful'"
+      - name: Install bore-cli
+        run: |
+          source ~/.cargo/env
+          cargo install bore-cli
+          echo "bore-cli installed successfully"
 
-    - name: Prepare VPS Directory
-      run: |
-        ssh -i ~/.ssh/id_rsa ${{ secrets.VPS_USER }}@${{ secrets.VPS_IP }} "
-          sudo mkdir -p ${{ env.DEPLOY_PATH }} &&
-          sudo chown -R \$USER:\$USER ${{ env.DEPLOY_PATH }} &&
-          sudo chmod -R 755 ${{ env.DEPLOY_PATH }}
-        "
+      - name: Install required packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sshpass net-tools
 
-    - name: Deploy Files to VPS
-      run: |
-        rsync -avz --delete -e "ssh -i ~/.ssh/id_rsa" \
-          --exclude '.git' \
-          --exclude '.github' \
-          --exclude 'node_modules' \
-          --exclude 'vendor' \
-          --exclude '.env' \
-          --exclude '*.log' \
-          ./ ${{ secrets.VPS_USER }}@${{ secrets.VPS_IP }}:${{ env.DEPLOY_PATH }}/
+      - name: Configure SSH for password authentication
+        run: |
+          echo "🔧 Enabling password authentication in SSH..."
+          sudo sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo systemctl restart ssh
+          sleep 3
 
-    - name: Install Dependencies
-      run: |
-        ssh -i ~/.ssh/id_rsa ${{ secrets.VPS_USER }}@${{ secrets.VPS_IP }} "
-          cd ${{ env.DEPLOY_PATH }} &&
-          
-          # Node.js
-          if [ -f package.json ]; then
-            curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash - &&
-            sudo apt-get install -y nodejs &&
-            npm ci --only=production
-          fi &&
-          
-          # Python
-          if [ -f requirements.txt ]; then
-            sudo apt-get update &&
-            sudo apt-get install -y python3-pip python3-venv &&
-            python3 -m venv venv &&
-            source venv/bin/activate &&
-            pip install -r requirements.txt
-          fi &&
-          
-          # PHP
-          if [ -f composer.json ]; then
-            sudo apt-get update &&
-            sudo apt-get install -y php8.1 php8.1-cli php8.1-fpm php8.1-mysql composer &&
-            composer install --no-dev --optimize-autoloader
+      - name: Find SSH Port
+        id: ssh_port
+        run: |
+          SSH_PORT=$(grep -E "^Port" /etc/ssh/sshd_config | awk '{print $2}')
+          if [ -z "$SSH_PORT" ]; then
+            SSH_PORT=22
           fi
-        "
+          echo "✅ SSH is running on port: $SSH_PORT"
+          echo "SSH_PORT=$SSH_PORT" >> $GITHUB_ENV
+          echo "port=$SSH_PORT" >> $GITHUB_OUTPUT
 
-    - name: Configure Nginx
-      run: |
-        ssh -i ~/.ssh/id_rsa ${{ secrets.VPS_USER }}@${{ secrets.VPS_IP }} "
-          # Install Nginx if not present
-          if ! command -v nginx &> /dev/null; then
-            sudo apt-get update &&
-            sudo apt-get install -y nginx
-          fi &&
-          
-          # Create Nginx config
-          sudo tee /etc/nginx/sites-available/myapp > /dev/null <<'NGINX_CONF'
-server {
-    listen 80;
-    server_name _;
-    root ${{ env.DEPLOY_PATH }};
-    index index.html index.htm index.php;
-    
-    location / {
-        try_files \$uri \$uri/ /index.html;
-    }
-    
-    location ~ \.php\$ {
-        include snippets/fastcgi-php.conf;
-        fastcgi_pass unix:/var/run/php/php8.1-fpm.sock;
-    }
-}
-NGINX_CONF
-          
-          # Enable site
-          sudo ln -sf /etc/nginx/sites-available/myapp /etc/nginx/sites-enabled/ &&
-          sudo rm -f /etc/nginx/sites-enabled/default &&
-          sudo nginx -t &&
-          sudo systemctl reload nginx
-        "
+      - name: Set Password for runner User
+        run: |
+          echo "runner:12345678" | sudo chpasswd
+          echo "✅ Password set for runner user"
 
-    - name: Start Application
-      run: |
-        ssh -i ~/.ssh/id_rsa ${{ secrets.VPS_USER }}@${{ secrets.VPS_IP }} "
-          cd ${{ env.DEPLOY_PATH }} &&
-          
-          # Start Node.js app
-          if [ -f package.json ]; then
-            if ! command -v pm2 &> /dev/null; then
-              sudo npm install -g pm2
-            fi &&
-            
-            if [ -f server.js ]; then
-              pm2 delete server 2>/dev/null || true &&
-              pm2 start server.js --name 'myapp'
-            elif [ -f app.js ]; then
-              pm2 delete app 2>/dev/null || true &&
-              pm2 start app.js --name 'myapp'
-            elif [ -f index.js ]; then
-              pm2 delete index 2>/dev/null || true &&
-              pm2 start index.js --name 'myapp'
-            fi &&
-            
-            pm2 save &&
-            sudo env PATH=\$PATH:/usr/bin pm2 startup systemd -u \$USER --hp /home/\$USER
+      - name: Test local SSH connection
+        run: |
+          echo "🧪 Testing local SSH on port ${{ env.SSH_PORT }}..."
+          sleep 5
+          sshpass -p "12345678" ssh -o StrictHostKeyChecking=no -p ${{ env.SSH_PORT }} runner@localhost whoami \
+            && echo "✅ Local SSH OK" || echo "⚠️ Local SSH test failed"
+
+      - name: Start Bore Tunnel (with auto‑restart)
+        id: bore_tunnel
+        run: |
+          source ~/.cargo/env
+          echo "🚀 Starting bore tunnel on port ${{ env.SSH_PORT }} (will restart if needed)..."
+
+          # Function to start bore and capture its public port
+          start_bore() {
+            bore local ${{ env.SSH_PORT }} --to bore.pub > bore_output.txt 2>&1 &
+            BORE_PID=$!
+            sleep 10
+            if grep -q "listening at bore.pub:" bore_output.txt; then
+              PORT=$(grep -oP 'listening at bore.pub:\K\d+' bore_output.txt)
+              if [ -n "$PORT" ]; then
+                echo "$PORT" > /tmp/bore_port.txt
+                echo "BORE_PORT=$PORT" >> $GITHUB_ENV
+                echo "bore_port=$PORT" >> $GITHUB_OUTPUT
+                return 0
+              fi
+            fi
+            return 1
+          }
+
+          # Try up to 3 times initially
+          for i in {1..3}; do
+            if start_bore; then
+              break
+            fi
+            echo "Attempt $i failed, retrying..."
+            kill $BORE_PID 2>/dev/null || true
+            sleep 5
+          done
+
+          if [ ! -f /tmp/bore_port.txt ]; then
+            echo "❌ Failed to establish bore tunnel after 3 attempts"
+            exit 1
           fi
-        "
 
-    - name: Configure Firewall
-      run: |
-        ssh -i ~/.ssh/id_rsa ${{ secrets.VPS_USER }}@${{ secrets.VPS_IP }} "
-          # Install UFW if not present
-          if ! command -v ufw &> /dev/null; then
-            sudo apt-get update &&
-            sudo apt-get install -y ufw
-          fi &&
-          
-          # Reset and configure UFW
-          sudo ufw --force reset &&
-          sudo ufw default deny incoming &&
-          sudo ufw default allow outgoing &&
-          
-          # Allow SSH
-          sudo ufw allow 22/tcp &&
-          
-          # Allow all ports from 1 to 67890
-          sudo ufw allow 1:67890/tcp &&
-          sudo ufw allow 1:67890/udp &&
-          
-          # Allow common web ports
-          sudo ufw allow 80/tcp &&
-          sudo ufw allow 443/tcp &&
-          sudo ufw allow 3000/tcp &&
-          sudo ufw allow 8000/tcp &&
-          sudo ufw allow 8080/tcp &&
-          
-          # Enable UFW
-          echo 'y' | sudo ufw enable &&
-          sudo ufw status verbose
-        "
+          # Save bore PID for monitoring
+          echo $BORE_PID > /tmp/bore.pid
 
-    - name: Verify Deployment
-      run: |
-        ssh -i ~/.ssh/id_rsa ${{ secrets.VPS_USER }}@${{ secrets.VPS_IP }} "
-          echo 'Testing services...' &&
-          curl -I http://localhost 2>/dev/null | head -n 1 || echo 'Web server not responding' &&
-          curl -I http://localhost:3000 2>/dev/null | head -n 1 || echo 'Node.js not responding' &&
-          echo 'Deployment verification complete'
-        "
+      - name: Display Connection Information
+        run: |
+          echo "═══════════════════════════════════════════"
+          echo "🔌 BORE TUNNEL CONNECTION DETAILS"
+          echo "═══════════════════════════════════════════"
+          echo "📡 Local SSH Port: ${{ env.SSH_PORT }}"
+          echo "🌐 Bore Tunnel: bore.pub:${{ env.BORE_PORT }}"
+          echo "👤 Username: runner"
+          echo "🔑 Password: 12345678"
+          echo "═══════════════════════════════════════════"
+          echo ""
+          echo "📱 To connect: ssh -p ${{ env.BORE_PORT }} runner@bore.pub"
+          echo "═══════════════════════════════════════════"
 
-    - name: Deployment Summary
-      if: always()
-      run: |
-        echo "==================== DEPLOYMENT SUMMARY ===================="
-        echo "✅ VPS: ${{ secrets.VPS_IP }}"
-        echo "✅ User: ${{ secrets.VPS_USER }}"
-        echo "✅ Path: ${{ env.DEPLOY_PATH }}"
-        echo "✅ Firewall: Ports 1-67890 open"
-        echo ""
-        echo "📱 Access your application at: http://${{ secrets.VPS_IP }}"
-        echo "============================================================"
+      - name: Keep Tunnel Alive (30 days watchdog)
+        run: |
+          echo "🔄 Starting 30‑day watchdog – will restart bore/SSH if needed"
+          echo "📊 Status updates every minute"
+          echo ""
+
+          # Load ports
+          SSH_PORT=${{ env.SSH_PORT }}
+          BORE_PORT=${{ env.BORE_PORT }}
+
+          # Start a background watchdog that restarts bore if it dies
+          (
+            while true; do
+              sleep 30
+              if ! pgrep -f "bore local $SSH_PORT" > /dev/null; then
+                echo "$(date) ⚠️ Bore tunnel died – restarting..."
+                source ~/.cargo/env
+                bore local $SSH_PORT --to bore.pub > /dev/null 2>&1 &
+                NEW_BORE_PID=$!
+                echo $NEW_BORE_PID > /tmp/bore.pid
+                echo "$(date) ✅ Bore restarted with PID $NEW_BORE_PID"
+              fi
+              # Also check SSH (rarely needed, but good)
+              if ! pgrep -f "sshd.*$SSH_PORT" > /dev/null; then
+                echo "$(date) ⚠️ SSH died – restarting..."
+                sudo /usr/sbin/sshd -p $SSH_PORT -f /etc/ssh/sshd_config -D &
+                echo "$(date) ✅ SSH restarted"
+              fi
+            done
+          ) &
+
+          # Main loop – prints status every minute for 30 days
+          COUNTER=0
+          DAYS=0
+          HOURS=0
+          while [ $DAYS -lt 30 ]; do
+            COUNTER=$((COUNTER + 1))
+            if [ $COUNTER -eq 60 ]; then
+              COUNTER=0
+              HOURS=$((HOURS + 1))
+              if [ $HOURS -eq 24 ]; then
+                HOURS=0
+                DAYS=$((DAYS + 1))
+                echo ""
+                echo "═══════════════════════════════════════════"
+                echo "📊 DAY $DAYS COMPLETED – $((30 - DAYS)) days remaining"
+                echo "═══════════════════════════════════════════"
+              fi
+            fi
+
+            # Print status every minute
+            echo "[$(date)] ⏱️ Day $DAYS, $HOURS hours – bore.pub:$BORE_PORT → localhost:$SSH_PORT  (active)"
+
+            # Also show active connections count once per hour
+            if [ $((COUNTER % 60)) -eq 0 ]; then
+              CONNS=$(sudo netstat -tn | grep ":$SSH_PORT" | grep ESTABLISHED | wc -l)
+              echo "   👥 Active SSH connections: $CONNS"
+            fi
+
+            sleep 60
+          done
+
+          echo "✅ 30 days completed! Tunnel closed."
