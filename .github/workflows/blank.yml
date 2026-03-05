@@ -14,42 +14,64 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
+    - name: Debug - Show Secret Lengths (Safe)
+      run: |
+        echo "Checking secret lengths..."
+        echo "ORACLE_TENANCY_OCID length: ${#ORACLE_TENANCY_OCID}"
+        echo "ORACLE_USER_OCID length: ${#ORACLE_USER_OCID}"
+        echo "ORACLE_FINGERPRINT length: ${#ORACLE_FINGERPRINT}"
+        echo "ORACLE_COMPARTMENT_OCID length: ${#ORACLE_COMPARTMENT_OCID}"
+        echo "ORACLE_REGION: ${{ secrets.ORACLE_REGION }}"
+      env:
+        ORACLE_TENANCY_OCID: ${{ secrets.ORACLE_TENANCY_OCID }}
+        ORACLE_USER_OCID: ${{ secrets.ORACLE_USER_OCID }}
+        ORACLE_FINGERPRINT: ${{ secrets.ORACLE_FINGERPRINT }}
+        ORACLE_COMPARTMENT_OCID: ${{ secrets.ORACLE_COMPARTMENT_OCID }}
+
     - name: Setup Python and Install OCI CLI
       run: |
         # Update package list
         sudo apt-get update
         
-        # Install Python and venv if needed
-        sudo apt-get install -y python3 python3-pip python3-venv
+        # Install Python and pip
+        sudo apt-get install -y python3 python3-pip
         
-        # Install OCI CLI using pip (simpler method)
+        # Install OCI CLI
         pip3 install --upgrade pip
         pip3 install oci-cli
         
         # Add to PATH
         echo "$HOME/.local/bin" >> $GITHUB_PATH
-        echo "✅ OCI CLI installed"
-
-    - name: Verify OCI CLI Installation
-      run: |
-        # Source the PATH
         export PATH="$HOME/.local/bin:$PATH"
         
         # Verify installation
-        which oci
-        oci --version
-        echo "✅ OCI CLI verified"
+        which oci || echo "OCI not found in PATH"
+        oci --version || echo "OCI version command failed"
+        
+        echo "✅ OCI CLI installed"
 
     - name: Configure OCI CLI
       run: |
-        # Create .oci directory
-        mkdir -p ~/.oci
+        export PATH="$HOME/.local/bin:$PATH"
         
-        # Save private key
+        # Create .oci directory with correct permissions
+        mkdir -p ~/.oci
+        chmod 700 ~/.oci
+        
+        # Save private key - ensure it has correct format
         echo "${{ secrets.ORACLE_PRIVATE_KEY }}" > ~/.oci/oci_api_key.pem
+        
+        # Fix private key format if needed
+        sed -i 's/\\n/\n/g' ~/.oci/oci_api_key.pem
         chmod 600 ~/.oci/oci_api_key.pem
         
-        # Create OCI config file
+        # Show key info (first and last line only)
+        echo "Private key first line:"
+        head -n 1 ~/.oci/oci_api_key.pem
+        echo "Private key last line:"
+        tail -n 1 ~/.oci/oci_api_key.pem
+        
+        # Create OCI config file with proper format
         cat > ~/.oci/config << EOF
         [DEFAULT]
         user=${{ secrets.ORACLE_USER_OCID }}
@@ -59,11 +81,18 @@ jobs:
         key_file=~/.oci/oci_api_key.pem
         EOF
         
+        # Set correct permissions
+        chmod 600 ~/.oci/config
+        
         echo "✅ OCI CLI configured"
         
         # Test configuration
-        export PATH="$HOME/.local/bin:$PATH"
-        oci iam region list --all
+        echo "Testing OCI configuration..."
+        oci iam region list --query 'data[?name==`ap-singapore-1`].name' || {
+          echo "❌ OCI configuration test failed"
+          echo "Please check your OCIDs and fingerprint"
+          exit 1
+        }
 
     - name: Generate SSH Key Pair
       id: ssh-key
@@ -74,14 +103,12 @@ jobs:
         # Save public key
         SSH_PUBLIC_KEY=$(cat oracle-vps-key.pub)
         echo "SSH_PUBLIC_KEY=$SSH_PUBLIC_KEY" >> $GITHUB_ENV
-        echo "SSH_PUBLIC_KEY_CONTENT=$SSH_PUBLIC_KEY" >> $GITHUB_ENV
         
         # Save private key for artifact
         cp oracle-vps-key oracle-vps-key.pem
         chmod 600 oracle-vps-key.pem
         
         echo "✅ SSH key pair generated"
-        echo "Public key: $SSH_PUBLIC_KEY"
 
     - name: Create Network Resources
       run: |
@@ -96,7 +123,7 @@ jobs:
         echo "AD_NAME=$AD_NAME" >> $GITHUB_ENV
         echo "✅ Using Availability Domain: $AD_NAME"
         
-        # Create VCN (Virtual Cloud Network)
+        # Create VCN
         VCN_ID=$(oci network vcn create \
           --compartment-id ${{ secrets.ORACLE_COMPARTMENT_OCID }} \
           --cidr-block "10.0.0.0/16" \
@@ -104,19 +131,10 @@ jobs:
           --dns-label "sgvps" \
           --wait-for-state "AVAILABLE" \
           --query 'data.id' \
-          --raw-output 2>/dev/null || echo "")
-        
-        if [ -z "$VCN_ID" ]; then
-          echo "VCN may already exist, trying to get existing..."
-          VCN_ID=$(oci network vcn list \
-            --compartment-id ${{ secrets.ORACLE_COMPARTMENT_OCID }} \
-            --display-name "sg-vps-vcn" \
-            --query 'data[0].id' \
-            --raw-output)
-        fi
+          --raw-output)
         
         echo "VCN_ID=$VCN_ID" >> $GITHUB_ENV
-        echo "✅ VCN: $VCN_ID"
+        echo "✅ VCN created: $VCN_ID"
         
         # Create subnet
         SUBNET_ID=$(oci network subnet create \
@@ -127,20 +145,10 @@ jobs:
           --dns-label "sgsubnet" \
           --wait-for-state "AVAILABLE" \
           --query 'data.id' \
-          --raw-output 2>/dev/null || echo "")
-        
-        if [ -z "$SUBNET_ID" ]; then
-          echo "Subnet may already exist, trying to get existing..."
-          SUBNET_ID=$(oci network subnet list \
-            --compartment-id ${{ secrets.ORACLE_COMPARTMENT_OCID }} \
-            --vcn-id $VCN_ID \
-            --display-name "sg-vps-subnet" \
-            --query 'data[0].id' \
-            --raw-output)
-        fi
+          --raw-output)
         
         echo "SUBNET_ID=$SUBNET_ID" >> $GITHUB_ENV
-        echo "✅ Subnet: $SUBNET_ID"
+        echo "✅ Subnet created: $SUBNET_ID"
         
         # Create Internet Gateway
         IGW_ID=$(oci network internet-gateway create \
@@ -150,33 +158,21 @@ jobs:
           --display-name "sg-vps-igw" \
           --wait-for-state "AVAILABLE" \
           --query 'data.id' \
-          --raw-output 2>/dev/null || echo "")
-        
-        if [ -z "$IGW_ID" ]; then
-          echo "Internet Gateway may already exist, trying to get existing..."
-          IGW_ID=$(oci network internet-gateway list \
-            --compartment-id ${{ secrets.ORACLE_COMPARTMENT_OCID }} \
-            --vcn-id $VCN_ID \
-            --display-name "sg-vps-igw" \
-            --query 'data[0].id' \
-            --raw-output)
-        fi
+          --raw-output)
         
         echo "IGW_ID=$IGW_ID" >> $GITHUB_ENV
-        echo "✅ Internet Gateway: $IGW_ID"
+        echo "✅ Internet Gateway created"
 
     - name: Configure Route and Security Rules
       run: |
         export PATH="$HOME/.local/bin:$PATH"
         
-        # Get route table ID
+        # Get default route table
         ROUTE_TABLE_ID=$(oci network route-table list \
           --compartment-id ${{ secrets.ORACLE_COMPARTMENT_OCID }} \
           --vcn-id $VCN_ID \
           --query 'data[0].id' \
           --raw-output)
-        
-        echo "ROUTE_TABLE_ID=$ROUTE_TABLE_ID" >> $GITHUB_ENV
         
         # Add route rule for internet gateway
         oci network route-table update \
@@ -186,47 +182,19 @@ jobs:
         
         echo "✅ Route table updated"
         
-        # Create security list with ALL PORTS OPEN (1-67899)
+        # Create security list with ALL PORTS OPEN
         SECURITY_LIST_ID=$(oci network security-list create \
           --compartment-id ${{ secrets.ORACLE_COMPARTMENT_OCID }} \
           --vcn-id $VCN_ID \
           --display-name "sg-vps-security-list" \
-          --egress-security-rules '[{"destination":"0.0.0.0/0","protocol":"all","isStateless":false}]' \
+          --egress-security-rules '[{"destination":"0.0.0.0/0","protocol":"all"}]' \
           --ingress-security-rules '[
-            {
-              "source":"0.0.0.0/0",
-              "protocol":"6",
-              "tcpOptions":{"destinationPortRange":{"min":1,"max":67899}},
-              "isStateless":false,
-              "description":"Allow all TCP ports 1-67899"
-            },
-            {
-              "source":"0.0.0.0/0",
-              "protocol":"17",
-              "udpOptions":{"destinationPortRange":{"min":1,"max":67899}},
-              "isStateless":false,
-              "description":"Allow all UDP ports 1-67899"
-            },
-            {
-              "source":"0.0.0.0/0",
-              "protocol":"1",
-              "icmpOptions":{"type":8,"code":4},
-              "isStateless":false,
-              "description":"Allow ICMP (ping)"
-            }
+            {"source":"0.0.0.0/0","protocol":"6","tcpOptions":{"destinationPortRange":{"min":1,"max":67899}}},
+            {"source":"0.0.0.0/0","protocol":"17","udpOptions":{"destinationPortRange":{"min":1,"max":67899}}},
+            {"source":"0.0.0.0/0","protocol":"1","icmpOptions":{"type":8,"code":4}}
           ]' \
           --query 'data.id' \
-          --raw-output 2>/dev/null || echo "")
-        
-        if [ -z "$SECURITY_LIST_ID" ]; then
-          echo "Security list may already exist, trying to get existing..."
-          SECURITY_LIST_ID=$(oci network security-list list \
-            --compartment-id ${{ secrets.ORACLE_COMPARTMENT_OCID }} \
-            --vcn-id $VCN_ID \
-            --display-name "sg-vps-security-list" \
-            --query 'data[0].id' \
-            --raw-output)
-        fi
+          --raw-output)
         
         echo "SECURITY_LIST_ID=$SECURITY_LIST_ID" >> $GITHUB_ENV
         echo "✅ Security list created - ALL PORTS 1-67899 OPEN!"
@@ -246,7 +214,6 @@ jobs:
           --query 'data[0].id' \
           --raw-output)
         
-        echo "IMAGE_ID=$IMAGE_ID" >> $GITHUB_ENV
         echo "✅ Using image: $IMAGE_ID"
         
         # Create instance
@@ -257,7 +224,7 @@ jobs:
           --subnet-id $SUBNET_ID \
           --image-id $IMAGE_ID \
           --display-name "sg-vps" \
-          --metadata "{\"ssh_authorized_keys\":\"${{ env.SSH_PUBLIC_KEY_CONTENT }}\"}" \
+          --metadata "{\"ssh_authorized_keys\":\"${{ env.SSH_PUBLIC_KEY }}\"}" \
           --wait-for-state "RUNNING" \
           --query 'data.id' \
           --raw-output)
@@ -300,129 +267,6 @@ jobs:
           sleep 10
         done
 
-    - name: Setup VM with admin/admin
-      run: |
-        # Save private key
-        echo "${{ env.SSH_PUBLIC_KEY_CONTENT }}" > oracle-vps-key.pub
-        chmod 600 oracle-vps-key.pub
-        
-        # Create a setup script
-        cat > setup-vm.sh << 'EOF'
-        #!/bin/bash
-        
-        # Create admin user
-        sudo useradd -m -s /bin/bash admin
-        echo "admin:admin" | sudo chpasswd
-        sudo usermod -aG wheel admin
-        
-        # Configure SSH for password auth
-        sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
-        sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
-        sudo systemctl restart sshd
-        
-        # Allow password sudo
-        echo "admin ALL=(ALL) ALL" | sudo tee /etc/sudoers.d/admin
-        echo "admin ALL=(ALL) NOPASSWD: ALL" | sudo tee /etc/sudoers.d/admin-nopasswd
-        
-        # Install basic packages
-        sudo dnf update -y
-        sudo dnf install -y curl wget git vim htop net-tools docker nginx python3 python3-pip firewalld
-        
-        # Start Docker
-        sudo systemctl enable docker
-        sudo systemctl start docker
-        sudo usermod -aG docker admin
-        
-        # Configure firewall (open all ports)
-        sudo systemctl enable firewalld
-        sudo systemctl start firewalld
-        sudo firewall-cmd --permanent --add-port=1-67899/tcp
-        sudo firewall-cmd --permanent --add-port=1-67899/udp
-        sudo firewall-cmd --permanent --add-service=ssh
-        sudo firewall-cmd --permanent --add-service=http
-        sudo firewall-cmd --permanent --add-service=https
-        sudo firewall-cmd --reload
-        
-        # Create welcome page
-        cat > /tmp/index.html << 'HTML'
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Oracle Cloud Singapore VPS</title>
-            <style>
-                body { font-family: Arial; margin: 50px; background: linear-gradient(135deg, #ff6b6b 0%, #4ecdc4 100%); color: white; }
-                .container { background: rgba(255,255,255,0.1); padding: 40px; border-radius: 20px; text-align: center; }
-                h1 { font-size: 3em; }
-                .port { display: inline-block; background: rgba(255,255,255,0.2); padding: 10px; margin: 5px; border-radius: 5px; }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1>🇸🇬 Oracle Cloud Singapore VPS</h1>
-                <p>Username: <strong>admin</strong></p>
-                <p>Password: <strong>admin</strong></p>
-                <p>IP Address: $(curl -s ifconfig.me)</p>
-                <h2>🔥 ALL PORTS 1-67899 ARE OPEN!</h2>
-                <div>
-                    <span class="port">TCP 1-67899</span>
-                    <span class="port">UDP 1-67899</span>
-                    <span class="port">ICMP</span>
-                </div>
-            </div>
-        </body>
-        </html>
-        HTML
-        
-        sudo cp /tmp/index.html /usr/share/nginx/html/
-        sudo systemctl enable nginx
-        sudo systemctl start nginx
-        
-        # Create test server on port 8080
-        cat > /tmp/test-server.py << 'PYEOF'
-        import http.server
-        import socketserver
-        
-        PORT = 8080
-        
-        class Handler(http.server.SimpleHTTPRequestHandler):
-            def do_GET(self):
-                self.send_response(200)
-                self.send_header('Content-type', 'text/html')
-                self.end_headers()
-                
-                html = f"""
-                <html>
-                <head><title>Test Server</title></head>
-                <body>
-                    <h1>🇸🇬 Oracle Cloud Test Server</h1>
-                    <p>Port 8080 is working!</p>
-                    <p>Username: admin</p>
-                    <p>Password: admin</p>
-                </body>
-                </html>
-                """
-                self.wfile.write(html.encode())
-        
-        with socketserver.TCPServer(("", PORT), Handler) as httpd:
-            httpd.serve_forever()
-        PYEOF
-        
-        cd /tmp
-        python3 test-server.py &
-        
-        echo "✅ VM setup complete!"
-        EOF
-        
-        chmod +x setup-vm.sh
-        
-        # Use sshpass if available, otherwise manual instructions
-        echo "================================================"
-        echo "To complete setup, SSH into your VPS and run:"
-        echo "ssh opc@${{ env.PUBLIC_IP }}"
-        echo "Then run the following commands:"
-        echo "sudo bash -c '$(cat setup-vm.sh)'"
-        echo "================================================"
-
     - name: Display Connection Information
       run: |
         echo "========================================================"
@@ -431,27 +275,28 @@ jobs:
         echo ""
         echo "📋 CONNECTION DETAILS:"
         echo "   IP Address: ${{ env.PUBLIC_IP }}"
-        echo "   Username: admin"
-        echo "   Password: admin"
         echo ""
-        echo "🔗 SSH COMMAND (from Oracle Linux):"
-        echo "   ssh opc@${{ env.PUBLIC_IP }}"
+        echo "🔗 SSH CONNECTION (Default Oracle Linux user):"
+        echo "   ssh -i oracle-vps-key.pem opc@${{ env.PUBLIC_IP }}"
         echo ""
-        echo "📝 After SSH, run these commands to setup admin user:"
-        echo "   sudo useradd -m admin"
+        echo "📝 After connecting, run these commands to setup admin user:"
+        echo "   sudo useradd -m -s /bin/bash admin"
         echo "   echo 'admin:admin' | sudo chpasswd"
         echo "   sudo usermod -aG wheel admin"
         echo "   sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config"
         echo "   sudo systemctl restart sshd"
         echo ""
         echo "🌐 WEB ACCESS:"
-        echo "   http://${{ env.PUBLIC_IP }} (Nginx)"
-        echo "   http://${{ env.PUBLIC_IP }}:8080 (Test Server)"
+        echo "   http://${{ env.PUBLIC_IP }}"
         echo ""
-        echo "🔥 FIREWALL STATUS:"
-        echo "   ✅ ALL PORTS 1-67899 OPEN"
-        echo ""
+        echo "🔥 FIREWALL: ALL PORTS 1-67899 OPEN"
         echo "========================================================"
+
+    - name: Save SSH Private Key
+      uses: actions/upload-artifact@v4
+      with:
+        name: oracle-vps-ssh-key
+        path: oracle-vps-key.pem
 
     - name: Save Connection Info
       run: |
@@ -462,20 +307,19 @@ jobs:
         
         IP Address: ${{ env.PUBLIC_IP }}
         
-        INITIAL SSH (Oracle Linux):
-        ssh opc@${{ env.PUBLIC_IP }}
+        SSH COMMAND:
+        ssh -i oracle-vps-key.pem opc@${{ env.PUBLIC_IP }}
         
-        AFTER SETUP:
+        After setup:
         Username: admin
         Password: admin
         SSH: ssh admin@${{ env.PUBLIC_IP }}
         
-        WEB URLs:
+        WEB URL:
         http://${{ env.PUBLIC_IP }}
-        http://${{ env.PUBLIC_IP }}:8080
         
         FIREWALL:
-        All ports 1-67899 OPEN
+        All ports 1-67899 OPEN (TCP & UDP)
         
         ========================================================
         EOF
