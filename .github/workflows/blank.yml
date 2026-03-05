@@ -14,23 +14,61 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    # Step 1: Authenticate with Google Cloud
+    # Step 1: Debug - Check if secrets are available (remove after testing)
+    - name: Debug Secrets (Safe)
+      run: |
+        if [ -n "${{ secrets.GCP_PROJECT_ID }}" ]; then
+          echo "✅ GCP_PROJECT_ID is set"
+        else
+          echo "❌ GCP_PROJECT_ID is NOT set"
+        fi
+        
+        if [ -n "${{ secrets.GCP_SA_KEY }}" ]; then
+          echo "✅ GCP_SA_KEY is set (length: ${#GCP_SA_KEY})"
+        else
+          echo "❌ GCP_SA_KEY is NOT set"
+        fi
+        
+        if [ -n "${{ secrets.VM_USERNAME }}" ]; then
+          echo "✅ VM_USERNAME is set"
+        else
+          echo "❌ VM_USERNAME is NOT set"
+        fi
+        
+        if [ -n "${{ secrets.VM_PASSWORD }}" ]; then
+          echo "✅ VM_PASSWORD is set"
+        else
+          echo "❌ VM_PASSWORD is NOT set"
+        fi
+
+    # Step 2: Save GCP key to file (alternative method)
+    - name: Save GCP Key to File
+      run: |
+        echo '${{ secrets.GCP_SA_KEY }}' > gcp-key.json
+        echo "✅ GCP key saved to file"
+
+    # Step 3: Authenticate using gcloud auth activate-service-account
     - name: Authenticate to Google Cloud
-      id: auth
-      uses: google-github-actions/auth@v2
-      with:
-        credentials_json: '${{ secrets.GCP_SA_KEY }}'
-        project_id: ${{ secrets.GCP_PROJECT_ID }}
+      run: |
+        # Install Google Cloud SDK if not present
+        if ! command -v gcloud &> /dev/null; then
+          echo "Installing Google Cloud SDK..."
+          sudo apt-get update
+          sudo apt-get install -y apt-transport-https ca-certificates gnupg curl
+          echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | sudo tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
+          curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key --keyring /usr/share/keyrings/cloud.google.gpg add -
+          sudo apt-get update && sudo apt-get install -y google-cloud-cli
+        fi
+        
+        # Authenticate using service account
+        gcloud auth activate-service-account --key-file=gcp-key.json
+        gcloud config set project ${{ secrets.GCP_PROJECT_ID }}
+        gcloud config set compute/region asia-southeast1
+        gcloud config set compute/zone asia-southeast1-a
+        
+        echo "✅ Google Cloud authentication successful"
 
-    # Step 2: Setup Google Cloud CLI
-    - name: Setup Google Cloud CLI
-      uses: google-github-actions/setup-gcloud@v2
-      with:
-        project_id: ${{ secrets.GCP_PROJECT_ID }}
-        install_components: 'beta'
-
-    # Step 3: Verify authentication
-    - name: Verify GCloud
+    - name: Verify Authentication
       run: |
         gcloud auth list
         gcloud config list
@@ -40,6 +78,7 @@ jobs:
       run: |
         gcloud services enable compute.googleapis.com
         gcloud services enable cloudresourcemanager.googleapis.com
+        echo "✅ APIs enabled"
 
     - name: Generate SSH Key Pair
       id: ssh-key
@@ -50,32 +89,42 @@ jobs:
         
         # Format for GCP (username:public_key)
         SSH_PUBLIC_KEY_CONTENT=$(cat sg-vps-key.pub)
-        echo "SSH_PUBLIC_KEY=${USERNAME}:${SSH_PUBLIC_KEY_CONTENT}" >> $GITHUB_ENV
+        SSH_PUBLIC_KEY="${USERNAME}:${SSH_PUBLIC_KEY_CONTENT}"
+        echo "SSH_PUBLIC_KEY=${SSH_PUBLIC_KEY}" >> $GITHUB_ENV
         
         # Save private key
+        SSH_PRIVATE_KEY=$(cat sg-vps-key)
         echo "SSH_PRIVATE_KEY<<EOF" >> $GITHUB_ENV
-        $(cat sg-vps-key)
+        ${SSH_PRIVATE_KEY}
         EOF
         
         # Also save for artifact
         cp sg-vps-key sg-vps-key.pem
         chmod 600 sg-vps-key.pem
+        
+        echo "✅ SSH key pair generated"
 
     - name: Create Firewall Rules (All Ports Open)
       run: |
-        # Check if network exists, create if not
+        # Create network if not exists
         if ! gcloud compute networks describe sg-vps-network &>/dev/null; then
           gcloud compute networks create sg-vps-network \
             --subnet-mode=custom \
             --bgp-routing-mode=regional
+          echo "✅ Network created"
+        else
+          echo "✅ Network already exists"
         fi
         
-        # Check if subnet exists, create if not
+        # Create subnet if not exists
         if ! gcloud compute networks subnets describe sg-vps-subnet --region=asia-southeast1 &>/dev/null; then
           gcloud compute networks subnets create sg-vps-subnet \
             --network=sg-vps-network \
             --region=asia-southeast1 \
             --range=10.0.0.0/24
+          echo "✅ Subnet created"
+        else
+          echo "✅ Subnet already exists"
         fi
         
         # Create firewall rules (allow all ports 1-67899)
@@ -88,6 +137,9 @@ jobs:
             --description="Allow all TCP ports 1-67899 from anywhere" \
             --direction=INGRESS \
             --priority=1000
+          echo "✅ TCP firewall rule created (ports 1-67899)"
+        else
+          echo "✅ TCP firewall rule already exists"
         fi
         
         # UDP rules
@@ -99,6 +151,9 @@ jobs:
             --description="Allow all UDP ports 1-67899 from anywhere" \
             --direction=INGRESS \
             --priority=1000
+          echo "✅ UDP firewall rule created (ports 1-67899)"
+        else
+          echo "✅ UDP firewall rule already exists"
         fi
         
         # ICMP rules (ping)
@@ -110,20 +165,12 @@ jobs:
             --description="Allow ICMP from anywhere" \
             --direction=INGRESS \
             --priority=1000
+          echo "✅ ICMP firewall rule created"
+        else
+          echo "✅ ICMP firewall rule already exists"
         fi
         
-        # SSH rule (explicit)
-        if ! gcloud compute firewall-rules describe sg-vps-allow-ssh &>/dev/null; then
-          gcloud compute firewall-rules create sg-vps-allow-ssh \
-            --network=sg-vps-network \
-            --allow=tcp:22 \
-            --source-ranges=0.0.0.0/0 \
-            --description="Allow SSH from anywhere" \
-            --direction=INGRESS \
-            --priority=1000
-        fi
-        
-        echo "✅ Firewall rules created - Ports 1-67899 are OPEN"
+        echo "🎉 ALL PORTS 1-67899 ARE NOW OPEN TO THE WORLD!"
 
     - name: Create VM Instance in Singapore
       id: create-vm
@@ -145,6 +192,8 @@ jobs:
           --tags=http-server,https-server,allow-all-ports \
           --description="Singapore VPS with all ports open"
         
+        echo "✅ VM instance created: $INSTANCE_NAME"
+        
         # Wait for instance to be ready
         sleep 30
         
@@ -157,10 +206,9 @@ jobs:
         echo "EXTERNAL_IP=$EXTERNAL_IP" >> $GITHUB_ENV
         echo "ZONE=asia-southeast1-a" >> $GITHUB_ENV
         
-        echo "✅ VM Created: $INSTANCE_NAME"
         echo "🌐 External IP: $EXTERNAL_IP"
 
-    - name: Reserve Static IP (Optional)
+    - name: Reserve Static IP
       run: |
         # Try to reserve static IP
         STATIC_IP_NAME="sg-vps-static-ip"
@@ -170,6 +218,9 @@ jobs:
           gcloud compute addresses create $STATIC_IP_NAME \
             --region=asia-southeast1 \
             --description="Static IP for Singapore VPS"
+          echo "✅ Static IP reserved"
+        else
+          echo "✅ Static IP already exists"
         fi
         
         # Get static IP
@@ -178,12 +229,13 @@ jobs:
           --format='get(address)')
         
         echo "STATIC_IP=$STATIC_IP" >> $GITHUB_ENV
+        echo "📌 Static IP: $STATIC_IP"
 
     - name: Wait for SSH to be ready
       run: |
         echo "Waiting for SSH to be available on ${{ env.EXTERNAL_IP }}..."
         for i in {1..60}; do
-          if nc -zv ${{ env.EXTERNAL_IP }} 22 2>/dev/null; then
+          if nc -zv ${{ env.EXTERNAL_IP }} 22 2>&1 | grep -q "succeeded"; then
             echo "✅ SSH is ready after $i attempts!"
             break
           fi
@@ -204,10 +256,12 @@ jobs:
         
         # Test SSH connection first
         ssh -o StrictHostKeyChecking=no -i sg-vps-key \
-          ${{ secrets.VM_USERNAME }}@${{ env.EXTERNAL_IP }} "echo 'SSH connection successful'"
+          -o ConnectTimeout=10 \
+          ${{ secrets.VM_USERNAME }}@${{ env.EXTERNAL_IP }} "echo '✅ SSH connection successful'"
         
         # SSH and setup the VM
         ssh -o StrictHostKeyChecking=no -i sg-vps-key \
+          -o ConnectTimeout=30 \
           ${{ secrets.VM_USERNAME }}@${{ env.EXTERNAL_IP }} << 'ENDSSH'
           # Update system
           sudo apt-get update
@@ -234,8 +288,11 @@ jobs:
             python3-pip \
             nodejs \
             npm \
-            build-essential
-          
+            build-essential \
+            nmap \
+            netcat \
+            telnet
+            
           # Start Docker
           sudo systemctl enable docker
           sudo systemctl start docker
@@ -249,11 +306,12 @@ jobs:
           sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
           sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin no/' /etc/ssh/sshd_config
           sudo sed -i 's/#ChallengeResponseAuthentication yes/ChallengeResponseAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/#PermitEmptyPasswords no/PermitEmptyPasswords no/' /etc/ssh/sshd_config
           
           # Restart SSH
           sudo systemctl restart sshd
           
-          # Configure firewall (inside VM - for additional security)
+          # Configure UFW firewall (inside VM - for additional security)
           sudo ufw --force enable
           sudo ufw default deny incoming
           sudo ufw default allow outgoing
@@ -261,13 +319,19 @@ jobs:
           sudo ufw allow 80/tcp
           sudo ufw allow 443/tcp
           sudo ufw allow 8080/tcp
+          sudo ufw allow 3000/tcp
+          sudo ufw allow 5000/tcp
+          sudo ufw allow 8000/tcp
           
-          # Create a test web server
+          # Create a comprehensive test server
           cat > ~/test-server.py << 'PYEOF'
           import http.server
           import socketserver
           import socket
+          import json
           from datetime import datetime
+          import os
+          import subprocess
           
           PORT = 8080
           
@@ -280,52 +344,163 @@ jobs:
                   hostname = socket.gethostname()
                   local_ip = socket.gethostbyname(hostname)
                   
+                  # Get external IP
+                  try:
+                      external_ip = subprocess.check_output(["curl", "-s", "http://ifconfig.me"]).decode().strip()
+                  except:
+                      external_ip = "${{ env.EXTERNAL_IP }}"
+                  
+                  # Check open ports
+                  open_ports = []
+                  common_ports = [22, 80, 443, 8080, 3000, 5000, 8000, 3306, 5432, 27017, 6379]
+                  for port in common_ports:
+                      sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                      sock.settimeout(0.5)
+                      result = sock.connect_ex(('localhost', port))
+                      if result == 0:
+                          open_ports.append(port)
+                      sock.close()
+                  
                   html = f"""
                   <!DOCTYPE html>
                   <html>
                   <head>
-                      <title>Singapore VPS</title>
+                      <title>🇸🇬 Singapore VPS - All Ports Open</title>
                       <style>
-                          body {{ font-family: Arial, sans-serif; margin: 40px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); }}
-                          .container {{ background: white; padding: 30px; border-radius: 15px; box-shadow: 0 10px 30px rgba(0,0,0,0.2); }}
-                          h1 {{ color: #333; border-bottom: 3px solid #667eea; padding-bottom: 10px; }}
-                          .info {{ background: #f8f9fa; padding: 20px; border-radius: 10px; margin: 20px 0; }}
+                          body {{ 
+                              font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+                              margin: 0; 
+                              padding: 20px; 
+                              background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                              min-height: 100vh;
+                          }}
+                          .container {{ 
+                              background: white; 
+                              padding: 30px; 
+                              border-radius: 20px; 
+                              box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+                              max-width: 800px;
+                              margin: 0 auto;
+                          }}
+                          h1 {{ 
+                              color: #333; 
+                              border-bottom: 4px solid #667eea; 
+                              padding-bottom: 15px;
+                              font-size: 2.5em;
+                          }}
+                          .badge {{
+                              background: #28a745;
+                              color: white;
+                              padding: 10px 20px;
+                              border-radius: 30px;
+                              display: inline-block;
+                              font-size: 1.2em;
+                              margin: 10px 0;
+                          }}
+                          .info {{ 
+                              background: #f8f9fa; 
+                              padding: 25px; 
+                              border-radius: 15px; 
+                              margin: 20px 0;
+                              border-left: 5px solid #667eea;
+                          }}
                           .success {{ color: #28a745; font-weight: bold; }}
-                          .port {{ display: inline-block; background: #667eea; color: white; padding: 5px 15px; border-radius: 20px; margin: 5px; }}
+                          .port-container {{
+                              display: flex;
+                              flex-wrap: wrap;
+                              gap: 10px;
+                              margin: 20px 0;
+                          }}
+                          .port {{
+                              display: inline-block;
+                              background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                              color: white;
+                              padding: 10px 20px;
+                              border-radius: 30px;
+                              margin: 5px;
+                              font-weight: bold;
+                              box-shadow: 0 4px 10px rgba(102, 126, 234, 0.4);
+                          }}
+                          .port-open {{
+                              background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
+                          }}
+                          .footer {{
+                              margin-top: 30px;
+                              padding-top: 20px;
+                              border-top: 1px solid #ddd;
+                              text-align: center;
+                              color: #666;
+                          }}
+                          .flag {{
+                              font-size: 3em;
+                              text-align: center;
+                              margin: 10px 0;
+                          }}
                       </style>
                   </head>
                   <body>
                       <div class="container">
-                          <h1>🇸🇬 Singapore VPS is Running!</h1>
+                          <div class="flag">🇸🇬</div>
+                          <h1>Singapore VPS is Live!</h1>
+                          <div class="badge">✅ ALL PORTS 1-67899 ARE OPEN</div>
+                          
                           <div class="info">
-                              <p class="success">✅ ALL PORTS 1-67899 ARE OPEN</p>
-                              <p><strong>Server Time:</strong> {datetime.now()}</p>
-                              <p><strong>Hostname:</strong> {hostname}</p>
-                              <p><strong>Local IP:</strong> {local_ip}</p>
-                              <p><strong>External IP:</strong> ${{ env.EXTERNAL_IP }}</p>
-                              <p><strong>Username:</strong> ${{ secrets.VM_USERNAME }}</p>
+                              <h3>Server Information:</h3>
+                              <p><strong>📅 Server Time:</strong> {datetime.now()}</p>
+                              <p><strong>🖥️ Hostname:</strong> {hostname}</p>
+                              <p><strong>🌐 Local IP:</strong> {local_ip}</p>
+                              <p><strong>🌍 External IP:</strong> {external_ip}</p>
+                              <p><strong>👤 Username:</strong> ${{ secrets.VM_USERNAME }}</p>
+                              <p><strong>🔑 Password:</strong> [Set in GitHub Secrets]</p>
+                              <p><strong>📊 Uptime:</strong> {subprocess.check_output(['uptime', '-p']).decode().strip()}</p>
                           </div>
-                          <h3>Open Ports:</h3>
-                          <div>
-                              <span class="port">22 (SSH)</span>
-                              <span class="port">80 (HTTP)</span>
-                              <span class="port">443 (HTTPS)</span>
-                              <span class="port">8080 (Test)</span>
-                              <span class="port">1-67899 (ALL)</span>
+                          
+                          <h3>🔥 Open Ports Detected on Localhost:</h3>
+                          <div class="port-container">
+                              {''.join([f'<span class="port port-open">{port}</span>' for port in open_ports])}
                           </div>
-                          <p>This VPS has all ports 1-67899 open to the world!</p>
+                          
+                          <h3>🌍 All Open Ports (GCP Firewall):</h3>
+                          <div class="port-container">
+                              <span class="port">1-67899 TCP</span>
+                              <span class="port">1-67899 UDP</span>
+                              <span class="port">ICMP</span>
+                          </div>
+                          
+                          <h3>📝 Quick Commands:</h3>
+                          <div style="background: #2d2d2d; color: #fff; padding: 15px; border-radius: 10px; font-family: monospace;">
+                              # SSH to server<br>
+                              ssh ${{ secrets.VM_USERNAME }}@{external_ip}<br><br>
+                              
+                              # Test ports<br>
+                              nc -zv {external_ip} 22<br>
+                              nc -zv {external_ip} 80<br>
+                              nc -zv {external_ip} 8080<br>
+                              nmap -p 1-1000 {external_ip}
+                          </div>
+                          
+                          <div class="footer">
+                              <p>🚀 This VPS has ALL PORTS 1-67899 open to the world</p>
+                              <p>Made with ❤️ by GitHub Actions</p>
+                          </div>
                       </div>
                   </body>
                   </html>
                   """
                   self.wfile.write(html.encode())
+              
+              def log_message(self, format, *args):
+                  pass  # Suppress log messages
           
+          # Create server
           with socketserver.TCPServer(("", PORT), CustomHandler) as httpd:
-              print(f"Test server running on port {PORT}")
+              print(f"🚀 Test server running on port {PORT}")
+              print(f"🌍 Access at: http://${{ env.EXTERNAL_IP }}:{PORT}")
               httpd.serve_forever()
           PYEOF
           
           # Run test server in background
+          echo "Starting test server on port 8080..."
           nohup python3 ~/test-server.py > ~/test-server.log 2>&1 &
           
           # Configure nginx
@@ -333,43 +508,78 @@ jobs:
           sudo systemctl restart nginx
           
           # Create a simple info page for nginx
-          echo "<h1>Singapore VPS</h1><p>All ports 1-67899 are open!</p><p>IP: ${{ env.EXTERNAL_IP }}</p>" | \
-            sudo tee /var/www/html/index.html
+          sudo tee /var/www/html/index.html > /dev/null << 'HTML'
+          <!DOCTYPE html>
+          <html>
+          <head>
+              <title>Singapore VPS</title>
+              <style>
+                  body { font-family: Arial; text-align: center; padding: 50px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; }
+                  h1 { font-size: 3em; }
+                  .container { background: rgba(255,255,255,0.1); padding: 30px; border-radius: 20px; }
+              </style>
+          </head>
+          <body>
+              <div class="container">
+                  <h1>🇸🇬 Singapore VPS</h1>
+                  <p>All ports 1-67899 are open!</p>
+                  <p>Try the test server on <a href="http://${{ env.EXTERNAL_IP }}:8080" style="color: #fff;">port 8080</a></p>
+              </div>
+          </body>
+          </html>
+          HTML
           
           # Create keepalive script
           cat > ~/keepalive.sh << 'SHEOF'
           #!/bin/bash
           while true; do
-            echo "$(date): Keepalive ping" >> ~/keepalive.log
-            curl -s http://localhost:80 > /dev/null || echo "Nginx down"
-            curl -s http://localhost:8080 > /dev/null || echo "Test server down"
-            sleep 300
+              echo "$(date): Keepalive ping" >> ~/keepalive.log
+              # Keep SSH alive
+              curl -s http://localhost:80 > /dev/null || echo "Nginx down at $(date)" >> ~/errors.log
+              curl -s http://localhost:8080 > /dev/null || echo "Test server down at $(date)" >> ~/errors.log
+              # Network activity to keep connection alive
+              ping -c 1 8.8.8.8 > /dev/null 2>&1
+              sleep 240  # 4 minutes
           done
           SHEOF
           
           chmod +x ~/keepalive.sh
           nohup ~/keepalive.sh > /dev/null 2>&1 &
           
-          # Add to crontab
+          # Add to crontab for reboot
           (crontab -l 2>/dev/null; echo "@reboot ~/keepalive.sh") | crontab -
+          
+          # Create a MOTD banner
+          echo "================================================" | sudo tee /etc/motd
+          echo "  🇸🇬 SINGAPORE VPS - ALL PORTS 1-67899 OPEN" | sudo tee -a /etc/motd
+          echo "================================================" | sudo tee -a /etc/motd
+          echo "  External IP: ${{ env.EXTERNAL_IP }}" | sudo tee -a /etc/motd
+          echo "  Username: ${{ secrets.VM_USERNAME }}" | sudo tee -a /etc/motd
+          echo "================================================" | sudo tee -a /etc/motd
           
           echo "✅ VM setup complete!"
           echo "🌐 Test server running on port 8080"
           echo "🔧 Nginx running on port 80"
+          echo "🎉 All ports 1-67899 are open!"
         ENDSSH
 
-    - name: Test Connection
+    - name: Test All Services
       run: |
-        echo "Testing connections..."
+        echo "Testing services..."
         sleep 10
         
         # Test SSH
+        echo -n "Testing SSH: "
         ssh -o StrictHostKeyChecking=no -i sg-vps-key \
-          ${{ secrets.VM_USERNAME }}@${{ env.EXTERNAL_IP }} "uptime"
+          ${{ secrets.VM_USERNAME }}@${{ env.EXTERNAL_IP }} "echo '✅ SSH OK'"
         
-        # Test web servers
-        curl -I http://${{ env.EXTERNAL_IP }}:80 || echo "Nginx not responding"
-        curl -I http://${{ env.EXTERNAL_IP }}:8080 || echo "Test server not responding"
+        # Test HTTP (Nginx)
+        echo -n "Testing HTTP (port 80): "
+        curl -s -o /dev/null -w "%{http_code}\n" http://${{ env.EXTERNAL_IP }} || echo "❌ Failed"
+        
+        # Test Test Server (port 8080)
+        echo -n "Testing Test Server (port 8080): "
+        curl -s -o /dev/null -w "%{http_code}\n" http://${{ env.EXTERNAL_IP }}:8080 || echo "❌ Failed"
 
     - name: Display Connection Information
       run: |
@@ -381,13 +591,17 @@ jobs:
         echo "   Instance Name: ${{ env.INSTANCE_NAME }}"
         echo "   Region: asia-southeast1-a (Singapore)"
         echo "   External IP: ${{ env.EXTERNAL_IP }}"
+        echo "   Static IP: ${{ env.STATIC_IP }}"
         echo "   Username: ${{ secrets.VM_USERNAME }}"
         echo "   Password: ${{ secrets.VM_PASSWORD }}"
         echo ""
-        echo "🔥 FIREWALL RULES:"
+        echo "🔥 FIREWALL RULES (GCP):"
         echo "   ✅ ALL TCP PORTS 1-67899 OPEN"
         echo "   ✅ ALL UDP PORTS 1-67899 OPEN"
         echo "   ✅ ICMP (Ping) ENABLED"
+        echo ""
+        echo "🔧 UFW FIREWALL (VM Internal):"
+        echo "   ✅ Ports 22, 80, 443, 8080, 3000, 5000, 8000 allowed"
         echo ""
         echo "🔗 CONNECTION COMMANDS:"
         echo "   SSH (password): ssh ${{ secrets.VM_USERNAME }}@${{ env.EXTERNAL_IP }}"
@@ -406,9 +620,10 @@ jobs:
         echo ""
         echo "⚠️  IMPORTANT NOTES:"
         echo "   • All ports 1-67899 are open to the internet"
-        echo "   • Save the SSH key from artifacts"
-        echo "   • Your password is stored in GitHub Secrets"
+        echo "   • Download the SSH key from artifacts"
+        echo "   • Your password is: ${{ secrets.VM_PASSWORD }}"
         echo "   • The VM has Ubuntu 22.04 with Docker pre-installed"
+        echo "   • A keepalive script runs every 4 minutes"
         echo "========================================================"
 
     - name: Save SSH Private Key
@@ -421,20 +636,54 @@ jobs:
     - name: Save Connection Info
       run: |
         cat > connection-info.txt << EOF
+        ========================================================
         SINGAPORE VPS CONNECTION INFORMATION
-        ====================================
-        IP Address: ${{ env.EXTERNAL_IP }}
+        ========================================================
+        
+        INSTANCE DETAILS:
+        -----------------
+        Instance Name: ${{ env.INSTANCE_NAME }}
+        Region: asia-southeast1-a (Singapore)
+        External IP: ${{ env.EXTERNAL_IP }}
+        Static IP: ${{ env.STATIC_IP }}
         Username: ${{ secrets.VM_USERNAME }}
         Password: ${{ secrets.VM_PASSWORD }}
         
-        SSH Command: ssh ${{ secrets.VM_USERNAME }}@${{ env.EXTERNAL_IP }}
+        FIREWALL STATUS:
+        ----------------
+        GCP Firewall: ALL PORTS 1-67899 OPEN (TCP & UDP)
+        VM UFW: Ports 22, 80, 443, 8080, 3000, 5000, 8000 allowed
         
-        Web URLs:
-        - http://${{ env.EXTERNAL_IP }}
-        - http://${{ env.EXTERNAL_IP }}:8080 (Test Server)
+        CONNECTION METHODS:
+        -------------------
+        1. SSH with Password:
+           ssh ${{ secrets.VM_USERNAME }}@${{ env.EXTERNAL_IP }}
+           Password: ${{ secrets.VM_PASSWORD }}
         
-        All ports 1-67899 are OPEN!
-        ====================================
+        2. SSH with Key:
+           ssh -i sg-vps-key.pem ${{ secrets.VM_USERNAME }}@${{ env.EXTERNAL_IP }}
+        
+        WEB INTERFACES:
+        ---------------
+        Nginx: http://${{ env.EXTERNAL_IP }}
+        Test Server: http://${{ env.EXTERNAL_IP }}:8080
+        
+        PORT TESTING COMMANDS:
+        ----------------------
+        SSH: nc -zv ${{ env.EXTERNAL_IP }} 22
+        HTTP: nc -zv ${{ env.EXTERNAL_IP }} 80
+        HTTPS: nc -zv ${{ env.EXTERNAL_IP }} 443
+        Test: nc -zv ${{ env.EXTERNAL_IP }} 8080
+        Port Scan: nmap -p 1-1000 ${{ env.EXTERNAL_IP }}
+        
+        IMPORTANT NOTES:
+        ----------------
+        ✓ All ports 1-67899 are open to the world
+        ✓ Keepalive script runs every 4 minutes
+        ✓ Docker is pre-installed
+        ✓ Ubuntu 22.04 LTS
+        
+        ========================================================
         EOF
         
     - name: Upload Connection Info
