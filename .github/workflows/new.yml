@@ -1,100 +1,116 @@
-name: VPS 30-Day Connection
+name: Show My IP Address
 
 on:
-  schedule:
-    - cron: '0 */6 * * *'
-  workflow_dispatch:
+  workflow_dispatch:  # Manual trigger
   push:
     branches: [ main ]
+  schedule:
+    - cron: '0 */12 * * *'  # Runs every 12 hours
 
 jobs:
-  connect-to-vps:
+  show-ip:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
     
     steps:
-      - name: Install SSH Client
+      - name: Show GitHub Runner IP
         run: |
-          sudo apt-get update
-          sudo apt-get install -y sshpass openssh-server
-          sudo systemctl start ssh
-          echo "✅ SSH client and server installed"
+          echo "========================================="
+          echo "🌐 GITHUB RUNNER IP ADDRESS"
+          echo "========================================="
+          
+          # Get IP from multiple sources
+          echo "📡 IP from ifconfig.me:"
+          curl -s ifconfig.me || echo "Failed to get IP"
+          
+          echo ""
+          echo "📡 IP from icanhazip.com:"
+          curl -s icanhazip.com || echo "Failed to get IP"
+          
+          echo ""
+          echo "📡 IP from ipinfo.io:"
+          curl -s ipinfo.io/ip || echo "Failed to get IP"
+          
+          echo ""
+          echo "📡 All network interfaces:"
+          ip addr show | grep inet
       
-      - name: Set VPS Credentials
+      - name: Try to Detect VPS IP (if configured)
         run: |
-          # Using localhost (127.0.0.1) for local connection
-          echo "VPS_IP=127.0.0.1" >> $GITHUB_ENV
-          echo "VPS_USER=root" >> $GITHUB_ENV
-          echo "VPS_PASS=root" >> $GITHUB_ENV
+          echo "========================================="
+          echo "🔍 ATTEMPTING TO DETECT VPS IP"
+          echo "========================================="
           
-          echo "🔧 Configuration:"
-          echo "   IP: $VPS_IP (localhost)"
-          echo "   User: $VPS_USER"
-          echo "   Port: 22"
+          # This is where you would put your VPS IP if you have one
+          # For now, it will show as not configured
+          
+          echo "⚠️ No VPS IP configured in this workflow"
+          echo ""
+          echo "To add your VPS IP, edit this file and replace:"
+          echo "YOUR_VPS_IP_HERE with your actual IP"
       
-      - name: Setup Local SSH
+      - name: Show Localhost Info
         run: |
-          # Setup password for root (for local testing)
-          echo "root:root" | sudo chpasswd
+          echo "========================================="
+          echo "💻 LOCALHOST INFORMATION"
+          echo "========================================="
           
-          # Allow root login with password
-          sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
-          sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
-          sudo systemctl restart ssh
-          
-          echo "✅ Local SSH configured"
+          echo "Hostname: $(hostname)"
+          echo "Local IP: 127.0.0.1"
+          echo ""
+          echo "Network interfaces:"
+          ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}'
       
-      - name: Test Connection
+      - name: Create IP Report
         run: |
-          echo "🔍 Testing connection to $VPS_IP..."
+          cat > ip-report.txt << EOF
+          =========================================
+          IP ADDRESS REPORT
+          Generated: $(date)
+          =========================================
           
-          # Wait for SSH to be ready
-          sleep 5
+          GITHUB RUNNER INFORMATION:
+          --------------------------
+          Hostname: $(hostname)
+          Runner IPs:
+          $(ip addr show | grep inet | awk '{print "  - " $2}')
           
-          # Test SSH connection
-          sshpass -p "$VPS_PASS" ssh -o StrictHostKeyChecking=no \
-            -o ConnectTimeout=5 \
-            $VPS_USER@$VPS_IP "echo 'SSH is working'" && \
-            echo "✅ SSH connection successful" || \
-            echo "❌ SSH connection failed"
+          PUBLIC IPs:
+          -----------
+          ifconfig.me: $(curl -s --max-time 5 ifconfig.me 2>/dev/null || echo "Timeout")
+          icanhazip.com: $(curl -s --max-time 5 icanhazip.com 2>/dev/null || echo "Timeout")
+          
+          VPS CONFIGURATION:
+          -----------------
+          To add your VPS, set VPS_IP in the workflow
+          
+          =========================================
+          EOF
+          
+          echo "📄 IP Report created"
+          cat ip-report.txt
       
-      - name: SSH into VPS
-        run: |
-          echo "=================================="
-          echo "🚀 Connecting to VPS at $(date)"
-          echo "=================================="
-          
-          sshpass -p "$VPS_PASS" ssh -o StrictHostKeyChecking=no \
-            -o ConnectTimeout=10 \
-            $VPS_USER@$VPS_IP "
-            echo '✅ CONNECTED SUCCESSFULLY'
-            echo '=================================='
-            echo ''
-            echo '📋 SYSTEM INFO:'
-            echo '  Hostname: ' \$(hostname)
-            echo '  Uptime: ' \$(uptime -p)
-            echo '  Date: ' \$(date)
-            echo ''
-            echo '💾 RESOURCES:'
-            echo '  Memory:'
-            free -h
-            echo '  Disk:'
-            df -h /
-            echo '  Processes:'
-            ps aux | head -5
-          " || echo "❌ Connection failed"
+      - name: Upload IP Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: ip-report-${{ github.run_number }}
+          path: ip-report.txt
+          retention-days: 30
       
-      - name: Final Status
+      - name: Summary
         run: |
           echo ""
-          echo "═══════════════════════════════════"
-          echo "      WORKFLOW COMPLETE"
-          echo "═══════════════════════════════════"
+          echo "════════════════════════════════════════"
+          echo "         IP ADDRESS SUMMARY"
+          echo "════════════════════════════════════════"
           echo ""
-          echo "✅ Status: ${{ job.status }}"
-          echo "🕒 Time: $(date)"
-          echo "🔢 Run #: ${{ github.run_number }}"
-          echo "🌐 Connected to: localhost (127.0.0.1)"
+          echo "📍 GitHub Runner IP:"
+          echo "   - Check the logs above"
+          echo "   - Or download the IP report artifact"
           echo ""
-          echo "⏰ Next run in 6 hours"
-          echo "═══════════════════════════════════"
+          echo "💡 To add your VPS IP:"
+          echo "   1. Edit this workflow file"
+          echo "   2. Find YOUR_VPS_IP_HERE"
+          echo "   3. Replace with your actual IP"
+          echo ""
+          echo "📁 IP report saved as: ip-report-${{ github.run_number }}"
+          echo "════════════════════════════════════════"
