@@ -2,10 +2,10 @@ name: VPS 30-Day Connection
 
 on:
   schedule:
-    - cron: '0 */6 * * *'  # Runs every 6 hours
-  workflow_dispatch:        # Manual trigger
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
   push:
-    branches: [ main ]      # Run on push
+    branches: [ main ]
 
 jobs:
   connect-to-vps:
@@ -21,27 +21,26 @@ jobs:
       
       - name: Set VPS Credentials
         run: |
-          # !!! REPLACE THIS IP WITH YOUR ACTUAL VPS IP !!!
-          echo "VPS_IP=your-vps-ip-here" >> $GITHUB_ENV
+          # !!! IMPORTANT: PUT YOUR REAL VPS IP HERE !!!
+          echo "VPS_IP=203.0.113.45" >> $GITHUB_ENV  # <-- CHANGE THIS TO YOUR IP
           echo "VPS_USER=root" >> $GITHUB_ENV
           echo "VPS_PASS=root" >> $GITHUB_ENV
-          echo "VPS_PORT=22" >> $GITHUB_ENV
           
           echo "🔧 Configuration:"
           echo "   IP: $VPS_IP"
           echo "   User: $VPS_USER"
-          echo "   Port: $VPS_PORT"
+          echo "   Port: 22"
       
       - name: Test Connection
         run: |
           echo "🔍 Testing connection to $VPS_IP..."
           
-          # Simple ping test
+          # Try to connect
           ping -c 1 -W 3 $VPS_IP > /dev/null 2>&1
           if [ $? -eq 0 ]; then
             echo "✅ VPS is reachable"
           else
-            echo "⚠️ VPS not responding to ping (might still work)"
+            echo "⚠️ VPS not responding to ping (SSH might still work)"
           fi
       
       - name: SSH into VPS
@@ -50,52 +49,24 @@ jobs:
           echo "🚀 Connecting to VPS at $(date)"
           echo "=================================="
           
-          # Connect and run commands
           sshpass -p "$VPS_PASS" ssh -o StrictHostKeyChecking=no \
             -o ConnectTimeout=10 \
-            -p $VPS_PORT \
+            -p 22 \
             $VPS_USER@$VPS_IP "
             echo '✅ CONNECTED SUCCESSFULLY'
             echo '=================================='
             echo ''
             echo '📋 SYSTEM INFO:'
             echo '  Hostname: ' \$(hostname)
-            echo '  OS: ' \$(cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2 | tr -d '\"')
-            echo '  Kernel: ' \$(uname -r)
             echo '  Uptime: ' \$(uptime -p)
+            echo '  Date: ' \$(date)
             echo ''
             echo '💾 RESOURCES:'
             echo '  Memory:'
             free -h
             echo '  Disk:'
             df -h /
-            echo ''
-            echo '🌐 NETWORK:'
-            echo '  IP: ' \$(hostname -I | cut -d' ' -f1)
-            echo ''
-            echo '👥 USERS:'
-            who || echo '  No users logged in'
-            echo ''
-            echo '📅 TIME: ' \$(date)
-            echo '=================================='
-          " || echo "❌ Connection failed"
-      
-      - name: Create Log File
-        run: |
-          mkdir -p logs
-          echo "Run: ${{ github.run_number }}" > logs/status.txt
-          echo "Date: $(date)" >> logs/status.txt
-          echo "Status: ${{ job.status }}" >> logs/status.txt
-          echo "VPS IP: $VPS_IP" >> logs/status.txt
-          
-          echo "📝 Log created"
-      
-      - name: Upload Logs
-        uses: actions/upload-artifact@v4
-        with:
-          name: vps-logs-run-${{ github.run_number }}
-          path: logs/
-          retention-days: 30
+          " || echo "❌ Connection failed - Check if IP is correct and VPS is running"
       
       - name: Final Status
         run: |
@@ -109,5 +80,4 @@ jobs:
           echo "🔢 Run #: ${{ github.run_number }}"
           echo ""
           echo "⏰ Next run in 6 hours"
-          echo "📅 Will run for 30 days"
           echo "═══════════════════════════════════"
