@@ -146,12 +146,7 @@ jobs:
             
             echo "📦 INSTALLED PACKAGES (top 10)"
             echo "------------------------------"
-            dpkg -l | grep ^ii | head -10 || echo "dpkg command not available"
-            echo ""
-            
-            echo "🔒 FAILED LOGIN ATTEMPTS (last 10)"
-            echo "-----------------------------------"
-            grep "Failed password" /var/log/auth.log 2>/dev/null | tail -10 || echo "No failed logins or log not accessible"
+            dpkg -l | grep ^ii | head -10 2>/dev/null || echo "dpkg command not available"
             echo ""
             
             echo "=============================================="
@@ -211,7 +206,7 @@ EOF
    • Frequency: Every 6 hours
    • Daily runs: 4 connections
    • 30-day total: ~120 connections
-   • Next run: $(date -d '+6 hours' +"%Y-%m-%d %H:%M:%S UTC")
+   • Next run: $(date -d '+6 hours' +"%Y-%m-%d %H:%M:%S UTC" 2>/dev/null || echo "Unable to calculate")
 
 📊 PROGRESS TRACKING:
    • Current run: $RUN_NUMBER
@@ -301,7 +296,7 @@ EOF
           echo "   📊 Logs saved as: vps-connection-full-logs-${{ github.run_number }}"
           echo "   💓 Heartbeat saved as: heartbeat-${{ github.run_number }}"
           echo ""
-          echo "   ⏰ Next scheduled run: $(date -d '+6 hours' +"%Y-%m-%d %H:%M:%S UTC")"
+          echo "   ⏰ Next scheduled run: $(date -d '+6 hours' +"%Y-%m-%d %H:%M:%S UTC" 2>/dev/null || echo "Schedule active")"
           echo ""
           echo "═══════════════════════════════════════════════════════════════"
 
@@ -336,7 +331,7 @@ EOF
           30-Day VPS Connection Progress
           ===============================
           Start Date: $(date -d '-0 days' +"%Y-%m-%d")
-          End Date: $(date -d '+30 days' +"%Y-%m-%d")
+          End Date: $(date -d '+30 days' +"%Y-%m-%d" 2>/dev/null || echo "+30 days")
           
           Current Run: ${{ github.run_number }}
           Status: ${{ needs.connect-to-vps.result }}
@@ -345,3 +340,11 @@ EOF
           EOF
           
           echo "✅ Progress tracker created"
+      
+      - name: Upload Progress Tracker
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: progress-tracker-${{ github.run_number }}
+          path: progress.txt
+          retention-days: 30
