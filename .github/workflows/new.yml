@@ -4,172 +4,57 @@ on:
   push:
     branches: [ main, master ]
   schedule:
-    - cron: '0 */6 * * *'  # Runs every 6 hours
+    - cron: '0 */6 * * *'  # Every 6 hours
   workflow_dispatch:
-  repository_dispatch:
-    types: [ connect-vps ]
-
-# Prevent concurrent runs
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
 
 jobs:
-  vps-connection:
-    name: Connect to VPS
+  connect-to-vps:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     
     steps:
-      # Step 1: Checkout repository
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-      
-      # Step 2: Install required packages
-      - name: Install SSH Tools
+      - name: Install SSH Client
         run: |
-          echo "📦 Installing SSH packages..."
           sudo apt-get update
-          sudo apt-get install -y sshpass openssh-client netcat-openbsd
-          echo "✅ Installation complete"
+          sudo apt-get install -y sshpass openssh-client
       
-      # Step 3: Set VPS details
-      - name: Configure VPS Connection
+      - name: Set VPS Details
         run: |
-          # !!! REPLACE WITH YOUR VPS IP !!!
+          # IMPORTANT: REPLACE WITH YOUR ACTUAL VPS IP
           echo "VPS_IP=your-vps-ip-here" >> $GITHUB_ENV
           echo "VPS_USER=root" >> $GITHUB_ENV
           echo "VPS_PASS=root" >> $GITHUB_ENV
-          echo "VPS_PORT=22" >> $GITHUB_ENV
-          
-          echo "🔧 Configuration:"
-          echo "   IP: $VPS_IP"
-          echo "   User: $VPS_USER"
-          echo "   Port: $VPS_PORT"
       
-      # Step 4: Test connection
-      - name: Test Connectivity
-        run: |
-          echo "🔍 Testing connection to $VPS_IP:$VPS_PORT..."
-          
-          if nc -zv -w 5 $VPS_IP $VPS_PORT 2>&1 | grep -q "succeeded"; then
-            echo "✅ Port is open"
-            echo "CONNECTION_TEST=passed" >> $GITHUB_ENV
-          else
-            echo "❌ Cannot connect"
-            echo "CONNECTION_TEST=failed" >> $GITHUB_ENV
-            exit 1
-          fi
-      
-      # Step 5: SSH Connection
       - name: Connect to VPS
-        if: env.CONNECTION_TEST == 'passed'
         run: |
-          mkdir -p logs
-          TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-          LOG_FILE="logs/connection_${TIMESTAMP}.txt"
+          echo "🔄 Connecting to VPS at $VPS_IP..."
+          echo "=================================="
           
-          echo "🚀 Connecting to VPS..." | tee $LOG_FILE
-          echo "================================" >> $LOG_FILE
-          
-          # SSH Commands
+          # Simple SSH connection
           sshpass -p "$VPS_PASS" ssh -o StrictHostKeyChecking=no \
             -o ConnectTimeout=10 \
-            -p $VPS_PORT \
-            $VPS_USER@$VPS_IP '
-            echo "✅ CONNECTED SUCCESSFULLY"
-            echo "================================"
-            echo ""
-            echo "📋 SYSTEM INFO:"
-            echo "  Hostname: $(hostname)"
-            echo "  OS: $(cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2 | tr -d "\"")"
-            echo "  Uptime: $(uptime -p)"
-            echo ""
-            echo "💾 RESOURCES:"
-            echo "  CPU Cores: $(nproc)"
-            echo "  Memory:"
+            $VPS_USER@$VPS_IP "
+            echo '✅ Connected successfully!'
+            echo ''
+            echo '📊 System Info:'
+            echo '  Hostname: ' \$(hostname)
+            echo '  Uptime: ' \$(uptime -p)
+            echo '  Date: ' \$(date)
+            echo ''
+            echo '💾 Resources:'
             free -h
-            echo "  Disk:"
-            df -h /
-            echo ""
-            echo "🌐 NETWORK:"
-            echo "  IP: $(hostname -I | cut -d" " -f1)"
-            echo "  Open Ports:"
-            ss -tuln | grep LISTEN | head -5
-            echo ""
-            echo "👥 USERS:"
-            who || echo "  No users logged in"
-            echo ""
-            echo "📅 Time: $(date)"
-          ' >> $LOG_FILE 2>&1
-          
-          if grep -q "CONNECTED SUCCESSFULLY" $LOG_FILE; then
-            echo "✅ SSH successful" | tee -a $LOG_FILE
-            echo "STATUS=success" >> $GITHUB_ENV
-          else
-            echo "❌ SSH failed" | tee -a $LOG_FILE
-            echo "STATUS=failed" >> $GITHUB_ENV
-          fi
+            echo ''
+            df -h
+          " || echo "❌ Connection failed"
       
-      # Step 6: Create summary
-      - name: Create Summary
-        if: always()
+      - name: Log Success
+        if: success()
         run: |
-          cat > summary.txt << EOF
-===============================
-VPS CONNECTION SUMMARY
-===============================
-Date: $(date)
-Run #: ${{ github.run_number }}
-VPS IP: $VPS_IP
-Connection Test: ${CONNECTION_TEST:-not_run}
-SSH Status: ${STATUS:-unknown}
-
-Next run: $(date -d '+6 hours' 2>/dev/null || echo "in 6 hours")
-===============================
-EOF
-          cat summary.txt
+          echo "✅ Workflow completed successfully at $(date)"
+          echo "Next run in 6 hours"
       
-      # Step 7: Upload logs
-      - name: Upload Logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: vps-logs-run-${{ github.run_number }}
-          path: |
-            logs/
-            summary.txt
-          retention-days: 30
-      
-      # Step 8: Final status
-      - name: Final Status
-        if: always()
+      - name: Log Failure
+        if: failure()
         run: |
-          echo "========================================"
-          echo "WORKFLOW COMPLETE"
-          echo "========================================"
-          echo "Run #: ${{ github.run_number }}"
-          echo "Status: ${STATUS:-unknown}"
-          echo "Logs: vps-logs-run-${{ github.run_number }}"
-          echo "========================================"
-
-  # Monitoring job
-  monitor:
-    needs: vps-connection
-    runs-on: ubuntu-latest
-    if: always()
-    
-    steps:
-      - name: Track Progress
-        run: |
-          echo "📊 30-DAY PROGRESS"
-          echo "==================="
-          echo "Started: $(date)"
-          echo "Current run: ${{ github.run_number }}"
-          echo "Schedule: Every 6 hours"
-          echo "Expected runs: 120 (30 days)"
-          echo ""
-          echo "To stop after 30 days:"
-          echo "1. Go to Actions tab"
-          echo "2. Click workflow"
-          echo "3. Click ... → Disable workflow"
+          echo "❌ Workflow failed at $(date)"
+          echo "Check if VPS is running and IP is correct"
