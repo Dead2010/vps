@@ -1,116 +1,341 @@
-name: Show My IP Address
+name: SSH VPS Connection - 30 Days
 
 on:
-  workflow_dispatch:  # Manual trigger
-  push:
-    branches: [ main ]
+  # Schedule - runs every 6 hours for 30 days
   schedule:
-    - cron: '0 */12 * * *'  # Runs every 12 hours
+    - cron: '0 */6 * * *'
+  
+  # Manual trigger with custom inputs
+  workflow_dispatch:
+    inputs:
+      ssh_ip:
+        description: 'VPS IP Address'
+        required: true
+        default: 'your-vps-ip-here'
+        type: string
+      ssh_port:
+        description: 'SSH Port'
+        required: true
+        default: '22'
+        type: string
+      ssh_user:
+        description: 'SSH Username'
+        required: true
+        default: 'root'
+        type: string
+      ssh_password:
+        description: 'SSH Password'
+        required: true
+        default: 'root'
+        type: string
+      ssh_command:
+        description: 'Command to run (optional)'
+        required: false
+        default: 'uptime && free -h && df -h'
+        type: string
+
+# Prevent concurrent runs
+concurrency:
+  group: ssh-connection-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  show-ip:
+  ssh-connect:
+    name: 🔌 SSH Connection
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     
     steps:
-      - name: Show GitHub Runner IP
+      - name: Install SSH Tools
+        run: |
+          echo "📦 Installing SSH packages..."
+          sudo apt-get update
+          sudo apt-get install -y sshpass openssh-client netcat-openbsd
+          echo "✅ SSH tools installed"
+      
+      - name: Set SSH Connection Parameters
+        id: ssh_params
         run: |
           echo "========================================="
-          echo "🌐 GITHUB RUNNER IP ADDRESS"
+          echo "🔧 SSH CONNECTION PARAMETERS"
           echo "========================================="
           
-          # Get IP from multiple sources
-          echo "📡 IP from ifconfig.me:"
-          curl -s ifconfig.me || echo "Failed to get IP"
+          # Use workflow inputs or defaults
+          if [[ -n "${{ github.event.inputs.ssh_ip }}" ]]; then
+            SSH_IP="${{ github.event.inputs.ssh_ip }}"
+            SSH_PORT="${{ github.event.inputs.ssh_port }}"
+            SSH_USER="${{ github.event.inputs.ssh_user }}"
+            SSH_PASS="${{ github.event.inputs.ssh_password }}"
+            SSH_CMD="${{ github.event.inputs.ssh_command }}"
+          else
+            # Default values for scheduled runs
+            # !!! REPLACE THESE WITH YOUR ACTUAL VALUES !!!
+            SSH_IP="your-vps-ip-here"      # CHANGE THIS TO YOUR VPS IP
+            SSH_PORT="22"                    # CHANGE IF USING DIFFERENT PORT
+            SSH_USER="root"                  # CHANGE IF DIFFERENT USERNAME
+            SSH_PASS="root"                   # CHANGE TO YOUR PASSWORD
+            SSH_CMD="uptime && free -h && df -h"
+          fi
           
-          echo ""
-          echo "📡 IP from icanhazip.com:"
-          curl -s icanhazip.com || echo "Failed to get IP"
+          # Save to environment
+          echo "SSH_IP=$SSH_IP" >> $GITHUB_ENV
+          echo "SSH_PORT=$SSH_PORT" >> $GITHUB_ENV
+          echo "SSH_USER=$SSH_USER" >> $GITHUB_ENV
+          echo "SSH_PASS=$SSH_PASS" >> $GITHUB_ENV
+          echo "SSH_CMD=$SSH_CMD" >> $GITHUB_ENV
           
+          # Display parameters
           echo ""
-          echo "📡 IP from ipinfo.io:"
-          curl -s ipinfo.io/ip || echo "Failed to get IP"
+          echo "📋 Connection Details:"
+          echo "   • IP Address:  $SSH_IP"
+          echo "   • Port:        $SSH_PORT"
+          echo "   • Username:    $SSH_USER"
+          echo "   • Password:    [HIDDEN]"
+          echo "   • Command:     $SSH_CMD"
+          echo ""
           
-          echo ""
-          echo "📡 All network interfaces:"
-          ip addr show | grep inet
+          # Check if IP is placeholder
+          if [[ "$SSH_IP" == "your-vps-ip-here" ]]; then
+            echo "⚠️  WARNING: Using placeholder IP address!"
+            echo "   Please replace with your actual VPS IP:"
+            echo "   • In scheduled runs: Edit this file"
+            echo "   • For manual runs: Enter IP in workflow_dispatch"
+            echo ""
+            echo "❌ Cannot connect with placeholder IP"
+            exit 1
+          fi
       
-      - name: Try to Detect VPS IP (if configured)
+      - name: Test SSH Port Connectivity
         run: |
           echo "========================================="
-          echo "🔍 ATTEMPTING TO DETECT VPS IP"
+          echo "🔍 TESTING SSH CONNECTION"
           echo "========================================="
+          echo "Testing $SSH_IP on port $SSH_PORT..."
           
-          # This is where you would put your VPS IP if you have one
-          # For now, it will show as not configured
-          
-          echo "⚠️ No VPS IP configured in this workflow"
-          echo ""
-          echo "To add your VPS IP, edit this file and replace:"
-          echo "YOUR_VPS_IP_HERE with your actual IP"
+          # Test if port is open
+          if nc -zv -w 5 $SSH_IP $SSH_PORT 2>&1 | grep -q "succeeded"; then
+            echo "✅ Port $SSH_PORT is open and accessible"
+            echo "PORT_OPEN=true" >> $GITHUB_ENV
+          else
+            echo "❌ Cannot connect to $SSH_IP on port $SSH_PORT"
+            echo "   Possible issues:"
+            echo "   • VPS is offline"
+            echo "   • SSH service not running"
+            echo "   • Firewall blocking port $SSH_PORT"
+            echo "   • Wrong IP address"
+            echo "PORT_OPEN=false" >> $GITHUB_ENV
+            exit 1
+          fi
       
-      - name: Show Localhost Info
+      - name: Create SSH Session Log
+        run: |
+          mkdir -p ssh-logs
+          TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+          LOG_FILE="ssh-logs/ssh_${TIMESTAMP}.log"
+          echo "SSH_LOG_FILE=$LOG_FILE" >> $GITHUB_ENV
+          
+          echo "=========================================" > $LOG_FILE
+          echo "SSH SESSION LOG - $(date)" >> $LOG_FILE
+          echo "=========================================" >> $LOG_FILE
+          echo "IP: $SSH_IP" >> $LOG_FILE
+          echo "Port: $SSH_PORT" >> $LOG_FILE
+          echo "User: $SSH_USER" >> $LOG_FILE
+          echo "=========================================" >> $LOG_FILE
+          echo "" >> $LOG_FILE
+      
+      - name: Execute SSH Connection
+        id: ssh_exec
         run: |
           echo "========================================="
-          echo "💻 LOCALHOST INFORMATION"
+          echo "🚀 EXECUTING SSH CONNECTION"
+          echo "========================================="
+          echo "Connecting to $SSH_USER@$SSH_IP:$SSH_PORT..."
+          echo "Command: $SSH_CMD"
+          echo ""
+          
+          # Create expect script for better SSH handling
+          cat > ssh_expect.exp << 'EOF'
+#!/usr/bin/expect -f
+set timeout 30
+set ip [lindex $argv 0]
+set port [lindex $argv 1]
+set user [lindex $argv 2]
+set pass [lindex $argv 3]
+set cmd [lindex $argv 4]
+set logfile [lindex $argv 5]
+
+log_file $logfile
+
+spawn ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p $port $user@$ip $cmd
+expect {
+    "password:" { send "$pass\r" }
+    "yes/no" { send "yes\r"; exp_continue }
+    timeout { exit 1 }
+}
+expect eof
+catch wait result
+exit [lindex $result 3]
+EOF
+          
+          chmod +x ssh_expect.exp
+          
+          # Execute SSH with expect
+          ./ssh_expect.exp "$SSH_IP" "$SSH_PORT" "$SSH_USER" "$SSH_PASS" "$SSH_CMD" "${{ env.SSH_LOG_FILE }}"
+          SSH_EXIT_CODE=$?
+          
+          # Display the log
+          echo ""
+          echo "📄 CONNECTION OUTPUT:"
+          echo "────────────────────"
+          cat "${{ env.SSH_LOG_FILE }}"
+          echo "────────────────────"
+          
+          # Check success
+          if [ $SSH_EXIT_CODE -eq 0 ]; then
+            echo "✅ SSH connection successful!"
+            echo "SSH_STATUS=success" >> $GITHUB_ENV
+          else
+            echo "❌ SSH connection failed with exit code $SSH_EXIT_CODE"
+            echo "SSH_STATUS=failed" >> $GITHUB_ENV
+          fi
+      
+      - name: Run Additional SSH Commands (if specified)
+        if: env.SSH_STATUS == 'success'
+        run: |
+          echo "========================================="
+          echo "📊 GATHERING SYSTEM INFORMATION"
           echo "========================================="
           
-          echo "Hostname: $(hostname)"
-          echo "Local IP: 127.0.0.1"
-          echo ""
-          echo "Network interfaces:"
-          ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}'
+          # Extended system info commands
+          EXTENDED_CMDS=$(cat << 'EOF'
+            echo ""
+            echo "📋 SYSTEM INFORMATION"
+            echo "────────────────────"
+            echo "Hostname: $(hostname)"
+            echo "OS: $(cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2 | tr -d '"')"
+            echo "Kernel: $(uname -r)"
+            echo "Uptime: $(uptime -p)"
+            echo "Load: $(uptime | awk -F'load average:' '{print $2}')"
+            echo ""
+            
+            echo "💾 RESOURCE USAGE"
+            echo "────────────────"
+            echo "CPU Cores: $(nproc)"
+            echo ""
+            echo "Memory:"
+            free -h
+            echo ""
+            echo "Disk:"
+            df -h
+            echo ""
+            
+            echo "🌐 NETWORK"
+            echo "──────────"
+            echo "IPs: $(hostname -I)"
+            echo "Open Ports:"
+            ss -tuln | grep LISTEN | head -10
+            echo ""
+            
+            echo "👥 USERS"
+            echo "────────"
+            echo "Logged in:"
+            who || echo "No users"
+            echo ""
+            echo "Last 5 logins:"
+            last -5 2>/dev/null || echo "N/A"
+            echo ""
+            
+            echo "⚙️ SERVICES"
+            echo "───────────"
+            echo "Running services:"
+            systemctl list-units --type=service --state=running --no-pager | head -15
+            echo ""
+            
+            echo "📅 TIME"
+            echo "───────"
+            echo "Date: $(date)"
+            echo "Timezone: $(timedatectl | grep "Time zone" | awk '{print $3}')"
+EOF
+)
+          
+          # Execute extended commands
+          sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no \
+            -p $SSH_PORT \
+            $SSH_USER@$SSH_IP "$EXTENDED_CMDS" 2>&1 | tee -a "${{ env.SSH_LOG_FILE }}"
       
-      - name: Create IP Report
+      - name: Create Connection Summary
+        if: always()
         run: |
-          cat > ip-report.txt << EOF
-          =========================================
-          IP ADDRESS REPORT
-          Generated: $(date)
-          =========================================
+          cat > ssh-summary.txt << EOF
+╔══════════════════════════════════════════════════════════════╗
+║                 SSH CONNECTION SUMMARY                        ║
+╚══════════════════════════════════════════════════════════════╝
+
+📅 DATE: $(date)
+🆔 RUN: ${{ github.run_number }}
+
+🔌 CONNECTION DETAILS:
+   • SSH IP:       $SSH_IP
+   • SSH Port:     $SSH_PORT
+   • SSH Username: $SSH_USER
+   • Status:       ${SSH_STATUS:-unknown}
+
+📊 CONNECTION TESTS:
+   • Port Open:    ${PORT_OPEN:-unknown}
+   • SSH Success:  ${SSH_STATUS:-unknown}
+
+⏰ SCHEDULE:
+   • Frequency:    Every 6 hours
+   • Daily runs:   4 connections
+   • 30-day total: ~120 connections
+   • Next run:     $(date -d '+6 hours' 2>/dev/null || echo "in 6 hours")
+
+📁 LOG FILES:
+   • Session log:  ${{ env.SSH_LOG_FILE }}
+   • This summary: ssh-summary.txt
+
+⚙️ COMMAND EXECUTED:
+   $SSH_CMD
+
+════════════════════════════════════════════════════════════════
+EOF
           
-          GITHUB RUNNER INFORMATION:
-          --------------------------
-          Hostname: $(hostname)
-          Runner IPs:
-          $(ip addr show | grep inet | awk '{print "  - " $2}')
-          
-          PUBLIC IPs:
-          -----------
-          ifconfig.me: $(curl -s --max-time 5 ifconfig.me 2>/dev/null || echo "Timeout")
-          icanhazip.com: $(curl -s --max-time 5 icanhazip.com 2>/dev/null || echo "Timeout")
-          
-          VPS CONFIGURATION:
-          -----------------
-          To add your VPS, set VPS_IP in the workflow
-          
-          =========================================
-          EOF
-          
-          echo "📄 IP Report created"
-          cat ip-report.txt
+          cat ssh-summary.txt
       
-      - name: Upload IP Report
+      - name: Upload SSH Logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ip-report-${{ github.run_number }}
-          path: ip-report.txt
+          name: ssh-logs-run-${{ github.run_number }}
+          path: |
+            ssh-logs/
+            ssh-summary.txt
           retention-days: 30
       
-      - name: Summary
+      - name: Display Final Status
+        if: always()
         run: |
           echo ""
-          echo "════════════════════════════════════════"
-          echo "         IP ADDRESS SUMMARY"
-          echo "════════════════════════════════════════"
+          echo "████████████████████████████████████████████████████████"
+          echo "██                                                    ██"
+          echo "██             SSH WORKFLOW COMPLETE                  ██"
+          echo "██                                                    ██"
+          echo "████████████████████████████████████████████████████████"
           echo ""
-          echo "📍 GitHub Runner IP:"
-          echo "   - Check the logs above"
-          echo "   - Or download the IP report artifact"
+          echo "   🔌 Connection: $SSH_IP:$SSH_PORT"
+          echo "   👤 Username:   $SSH_USER"
+          if [ "$SSH_STATUS" == "success" ]; then
+            echo "   ✅ Status:      SUCCESS"
+          else
+            echo "   ❌ Status:      FAILED"
+          fi
           echo ""
-          echo "💡 To add your VPS IP:"
-          echo "   1. Edit this workflow file"
-          echo "   2. Find YOUR_VPS_IP_HERE"
-          echo "   3. Replace with your actual IP"
+          echo "   🕒 Time:        $(date)"
+          echo "   🔢 Run #:       ${{ github.run_number }}"
           echo ""
-          echo "📁 IP report saved as: ip-report-${{ github.run_number }}"
-          echo "════════════════════════════════════════"
+          echo "   📁 Logs saved:  ssh-logs-run-${{ github.run_number }}"
+          echo "   ⏰ Next run:     $(date -d '+6 hours' 2>/dev/null || echo 'in 6 hours')"
+          echo ""
+          echo "   💡 To stop after 30 days: Disable workflow in Actions tab"
+          echo ""
+          echo "████████████████████████████████████████████████████████"
