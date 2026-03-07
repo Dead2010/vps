@@ -16,32 +16,47 @@ jobs:
       - name: Install SSH Client
         run: |
           sudo apt-get update
-          sudo apt-get install -y sshpass
-          echo "✅ SSH client installed"
+          sudo apt-get install -y sshpass openssh-server
+          sudo systemctl start ssh
+          echo "✅ SSH client and server installed"
       
       - name: Set VPS Credentials
         run: |
-          # !!! IMPORTANT: PUT YOUR REAL VPS IP HERE !!!
-          echo "VPS_IP=203.0.113.45" >> $GITHUB_ENV  # <-- CHANGE THIS TO YOUR IP
+          # Using localhost (127.0.0.1) for local connection
+          echo "VPS_IP=127.0.0.1" >> $GITHUB_ENV
           echo "VPS_USER=root" >> $GITHUB_ENV
           echo "VPS_PASS=root" >> $GITHUB_ENV
           
           echo "🔧 Configuration:"
-          echo "   IP: $VPS_IP"
+          echo "   IP: $VPS_IP (localhost)"
           echo "   User: $VPS_USER"
           echo "   Port: 22"
+      
+      - name: Setup Local SSH
+        run: |
+          # Setup password for root (for local testing)
+          echo "root:root" | sudo chpasswd
+          
+          # Allow root login with password
+          sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo systemctl restart ssh
+          
+          echo "✅ Local SSH configured"
       
       - name: Test Connection
         run: |
           echo "🔍 Testing connection to $VPS_IP..."
           
-          # Try to connect
-          ping -c 1 -W 3 $VPS_IP > /dev/null 2>&1
-          if [ $? -eq 0 ]; then
-            echo "✅ VPS is reachable"
-          else
-            echo "⚠️ VPS not responding to ping (SSH might still work)"
-          fi
+          # Wait for SSH to be ready
+          sleep 5
+          
+          # Test SSH connection
+          sshpass -p "$VPS_PASS" ssh -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=5 \
+            $VPS_USER@$VPS_IP "echo 'SSH is working'" && \
+            echo "✅ SSH connection successful" || \
+            echo "❌ SSH connection failed"
       
       - name: SSH into VPS
         run: |
@@ -51,7 +66,6 @@ jobs:
           
           sshpass -p "$VPS_PASS" ssh -o StrictHostKeyChecking=no \
             -o ConnectTimeout=10 \
-            -p 22 \
             $VPS_USER@$VPS_IP "
             echo '✅ CONNECTED SUCCESSFULLY'
             echo '=================================='
@@ -66,7 +80,9 @@ jobs:
             free -h
             echo '  Disk:'
             df -h /
-          " || echo "❌ Connection failed - Check if IP is correct and VPS is running"
+            echo '  Processes:'
+            ps aux | head -5
+          " || echo "❌ Connection failed"
       
       - name: Final Status
         run: |
@@ -78,6 +94,7 @@ jobs:
           echo "✅ Status: ${{ job.status }}"
           echo "🕒 Time: $(date)"
           echo "🔢 Run #: ${{ github.run_number }}"
+          echo "🌐 Connected to: localhost (127.0.0.1)"
           echo ""
           echo "⏰ Next run in 6 hours"
           echo "═══════════════════════════════════"
