@@ -153,42 +153,13 @@ jobs:
           echo "Command: $SSH_CMD"
           echo ""
           
-          # Create expect script for better SSH handling
-          cat > ssh_expect.exp << 'EOF'
-#!/usr/bin/expect -f
-set timeout 30
-set ip [lindex $argv 0]
-set port [lindex $argv 1]
-set user [lindex $argv 2]
-set pass [lindex $argv 3]
-set cmd [lindex $argv 4]
-set logfile [lindex $argv 5]
-
-log_file $logfile
-
-spawn ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p $port $user@$ip $cmd
-expect {
-    "password:" { send "$pass\r" }
-    "yes/no" { send "yes\r"; exp_continue }
-    timeout { exit 1 }
-}
-expect eof
-catch wait result
-exit [lindex $result 3]
-EOF
+          # Simple SSH connection with sshpass (no expect script to avoid YAML issues)
+          sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=10 \
+            -p $SSH_PORT \
+            $SSH_USER@$SSH_IP "$SSH_CMD" 2>&1 | tee -a "${{ env.SSH_LOG_FILE }}"
           
-          chmod +x ssh_expect.exp
-          
-          # Execute SSH with expect
-          ./ssh_expect.exp "$SSH_IP" "$SSH_PORT" "$SSH_USER" "$SSH_PASS" "$SSH_CMD" "${{ env.SSH_LOG_FILE }}"
-          SSH_EXIT_CODE=$?
-          
-          # Display the log
-          echo ""
-          echo "📄 CONNECTION OUTPUT:"
-          echo "────────────────────"
-          cat "${{ env.SSH_LOG_FILE }}"
-          echo "────────────────────"
+          SSH_EXIT_CODE=${PIPESTATUS[0]}
           
           # Check success
           if [ $SSH_EXIT_CODE -eq 0 ]; then
@@ -199,25 +170,26 @@ EOF
             echo "SSH_STATUS=failed" >> $GITHUB_ENV
           fi
       
-      - name: Run Additional SSH Commands (if specified)
+      - name: Run Extended System Info
         if: env.SSH_STATUS == 'success'
         run: |
           echo "========================================="
           echo "📊 GATHERING SYSTEM INFORMATION"
           echo "========================================="
           
-          # Extended system info commands
-          EXTENDED_CMDS=$(cat << 'EOF'
+          # System info commands
+          sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no \
+            -p $SSH_PORT \
+            $SSH_USER@$SSH_IP '
             echo ""
             echo "📋 SYSTEM INFORMATION"
             echo "────────────────────"
             echo "Hostname: $(hostname)"
-            echo "OS: $(cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2 | tr -d '"')"
+            echo "OS: $(cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2 | tr -d "\"")"
             echo "Kernel: $(uname -r)"
             echo "Uptime: $(uptime -p)"
-            echo "Load: $(uptime | awk -F'load average:' '{print $2}')"
+            echo "Load: $(uptime | awk -F"load average:" "{print $2}")"
             echo ""
-            
             echo "💾 RESOURCE USAGE"
             echo "────────────────"
             echo "CPU Cores: $(nproc)"
@@ -228,14 +200,12 @@ EOF
             echo "Disk:"
             df -h
             echo ""
-            
             echo "🌐 NETWORK"
             echo "──────────"
             echo "IPs: $(hostname -I)"
             echo "Open Ports:"
             ss -tuln | grep LISTEN | head -10
             echo ""
-            
             echo "👥 USERS"
             echo "────────"
             echo "Logged in:"
@@ -244,24 +214,10 @@ EOF
             echo "Last 5 logins:"
             last -5 2>/dev/null || echo "N/A"
             echo ""
-            
-            echo "⚙️ SERVICES"
-            echo "───────────"
-            echo "Running services:"
-            systemctl list-units --type=service --state=running --no-pager | head -15
-            echo ""
-            
             echo "📅 TIME"
             echo "───────"
             echo "Date: $(date)"
-            echo "Timezone: $(timedatectl | grep "Time zone" | awk '{print $3}')"
-EOF
-)
-          
-          # Execute extended commands
-          sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no \
-            -p $SSH_PORT \
-            $SSH_USER@$SSH_IP "$EXTENDED_CMDS" 2>&1 | tee -a "${{ env.SSH_LOG_FILE }}"
+          ' 2>&1 | tee -a "${{ env.SSH_LOG_FILE }}"
       
       - name: Create Connection Summary
         if: always()
