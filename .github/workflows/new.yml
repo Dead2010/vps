@@ -1,0 +1,143 @@
+name: VPS Connection - 30 Day Workflow
+
+on:
+  push:
+    branches: [ main, master ]
+  schedule:
+    - cron: '0 */4 * * *'  # Every 4 hours
+  workflow_dispatch:
+  watch:
+    types: [started]
+
+jobs:
+  vps-operations:
+    runs-on: ubuntu-latest
+    name: VPS Operations Job
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        attempt: [1, 2, 3]  # Retry mechanism
+    
+    steps:
+      - name: Setup SSH Environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sshpass netcat
+          
+      - name: Test VPS Connectivity First
+        env:
+          VPS_IP: "your-vps-ip-here"  # REPLACE WITH YOUR VPS IP
+        run: |
+          echo "🔍 Testing connectivity to $VPS_IP on port 22..."
+          if nc -zv $VPS_IP 22 -w 5 2>&1 | grep -q "succeeded"; then
+            echo "✅ Port 22 is open and accessible"
+          else
+            echo "❌ Cannot connect to port 22"
+            echo "⚠️ Please check if VPS is running and SSH is enabled"
+            exit 1
+          fi
+      
+      - name: Execute SSH Commands with Retry
+        id: ssh_commands
+        env:
+          VPS_IP: "your-vps-ip-here"  # REPLACE WITH YOUR VPS IP
+          VPS_USER: "root"
+          VPS_PASS: "root"
+        continue-on-error: true
+        run: |
+          # Create output directory
+          mkdir -p reports
+          
+          # Try SSH connection with password
+          sshpass -p "$VPS_PASS" ssh -o StrictHostKeyChecking=no \
+            -o ConnectionAttempts=3 \
+            -o ConnectTimeout=15 \
+            $VPS_USER@$VPS_IP '
+            # Create session log
+            echo "========================================="
+            echo "VPS CONNECTION ESTABLISHED - $(date)"
+            echo "========================================="
+            
+            # System Information
+            echo ""
+            echo "📊 SYSTEM INFORMATION"
+            echo "----------------------"
+            echo "Hostname: $(hostname)"
+            echo "IP Address: $(hostname -I | cut -d" " -f1)"
+            echo "OS: $(cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2 | tr -d '"'"')"
+            echo "Kernel: $(uname -r)"
+            echo "Architecture: $(uname -m)"
+            echo "Uptime: $(uptime -p)"
+            echo "Load Average: $(uptime | awk -F'"'"'load average:'"'"' '"'"'{print $2}'"'"')"
+            
+            echo ""
+            echo "💾 RESOURCE USAGE"
+            echo "-----------------"
+            echo "CPU Cores: $(nproc)"
+            echo "Memory:"
+            free -h
+            echo ""
+            echo "Disk Usage:"
+            df -h | grep -E "^/dev/"
+            
+            echo ""
+            echo "🌐 NETWORK INFORMATION"
+            echo "----------------------"
+            echo "Open Ports:"
+            ss -tuln | grep LISTEN | head -10
+            
+            echo ""
+            echo "👥 USER SESSIONS"
+            echo "----------------"
+            echo "Logged in users:"
+            who || echo "No users logged in"
+            echo ""
+            echo "Last logins:"
+            last -5 2>/dev/null || echo "Command not available"
+            
+            echo ""
+            echo "⚙️ RUNNING SERVICES"
+            echo "-------------------"
+            systemctl list-units --type=service --state=running --no-pager | head -15
+            
+            echo ""
+            echo "✅ CONNECTION HEALTH CHECK PASSED"
+            echo "Timestamp: $(date)"
+            echo "========================================="
+          ' > reports/connection-report.txt 2>&1
+          
+          # Check if connection was successful
+          if grep -q "CONNECTION HEALTH CHECK PASSED" reports/connection-report.txt; then
+            echo "status=success" >> $GITHUB_OUTPUT
+            echo "✅ SSH connection successful!"
+          else
+            echo "status=failed" >> $GITHUB_OUTPUT
+            echo "❌ SSH connection failed"
+            cat reports/connection-report.txt
+          fi
+      
+      - name: Upload Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: vps-report-attempt-${{ matrix.attempt }}-${{ github.run_number }}
+          path: reports/
+          retention-days: 30
+      
+      - name: Create Status Badge
+        if: always()
+        run: |
+          if [ "${{ steps.ssh_commands.outputs.status }}" == "success" ]; then
+            echo "✅ VPS CONNECTION: SUCCESS" > status.txt
+          else
+            echo "❌ VPS CONNECTION: FAILED" > status.txt
+          fi
+          echo "Run: ${{ github.run_number }}" >> status.txt
+          echo "Date: $(date)" >> status.txt
+      
+      - name: Upload Status
+        uses: actions/upload-artifact@v4
+        with:
+          name: connection-status-${{ github.run_number }}
+          path: status.txt
+          retention-days: 30
