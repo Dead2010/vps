@@ -1,6 +1,6 @@
-name: Bore VPS
+name: Bore SSH VPS
 
-on: 
+on:
   workflow_dispatch:
 
 jobs:
@@ -8,47 +8,37 @@ jobs:
     runs-on: ubuntu-latest
     steps:
 
-    - name: Update system
+    - name: Setup SSH
       run: |
-        sudo apt update
+        sudo apt-get update
+        sudo apt-get install -y openssh-server curl
+        sudo mkdir /var/run/sshd
+        echo 'runner:12345678' | sudo chpasswd
 
-    - name: Install SSH
-      run: |
-        sudo apt install -y openssh-server curl
-        sudo mkdir -p /var/run/sshd
+        sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+        sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
 
-    - name: Set runner password
-      run: |
-        echo "runner:12345678" | sudo chpasswd
+        sudo service ssh start
 
-    - name: Enable password login
-      run: |
-        sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/g' /etc/ssh/sshd_config
-        sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/g' /etc/ssh/sshd_config
-        sudo service ssh restart
-
-    - name: Install bore
+    - name: Install Bore
       run: |
         curl -L https://github.com/ekzhang/bore/releases/latest/download/bore-x86_64-unknown-linux-musl -o bore
         chmod +x bore
-        sudo mv bore /usr/local/bin/
 
     - name: Start Bore Tunnel
       run: |
-        bore local 22 --to bore.pub > bore.log 2>&1 &
-        sleep 5
-        cat bore.log
+        ./bore local 22 --to bore.pub &
 
-    - name: Show SSH Login
+        sleep 10
+
+    - name: Show Login
       run: |
-        echo "=============================="
+        echo "======================="
         echo "SSH USER: runner"
         echo "SSH PASSWORD: 12345678"
-        echo "Check above for bore.pub port"
-        echo "Example:"
-        echo "ssh runner@bore.pub -p PORT"
-        echo "=============================="
+        echo "HOST: bore.pub"
+        echo "PORT: Check above logs"
+        echo "======================="
 
-    - name: Keep VPS Alive
-      run: |
-        sleep 6h
+    - name: Keep Alive
+      run: sleep 21600
