@@ -1,432 +1,54 @@
-name: 🚀 COMPLETE 30-DAY BORE TUNNEL - SINGAPORE SERVER
+name: Bore VPS
 
-on:
-  schedule:
-    # Run every 5 hours to bypass 6-hour limit
-    - cron: '0 */5 * * *'
+on: 
   workflow_dispatch:
-    inputs:
-      server_location:
-        description: 'Server Location (sg/in/lk)'
-        required: true
-        default: 'sg'
-        type: choice
-        options:
-          - sg (Singapore)
-          - in (India - Mumbai)
-          - lk (Lakshadweep/Maldives)
-      duration_days:
-        description: 'Duration in days'
-        required: true
-        default: '30'
-        type: number
-  push:
-    branches: [ main ]
-
-# Environment variables for persistence
-env:
-  TOTAL_DAYS: 30
-  SSH_PORT: 2022
-  BORE_SERVER: bore.pub
-  RUNNER_USER: tunneluser
-  RUNNER_PASS: SgLkIn2026!
 
 jobs:
-  initialize-30day-tunnel:
-    name: "📅 Day ${{ github.run_number }} of 30"
+  vps:
     runs-on: ubuntu-latest
-    timeout-minutes: 350 # Just under 6 hours
-    
-    # Store state between runs
-    outputs:
-      current_day: ${{ steps.day_counter.outputs.current_day }}
-      bore_port: ${{ steps.tunnel.outputs.bore_port }}
-      server_location: ${{ steps.location.outputs.server }}
-      
     steps:
-      # ============= DAY COUNTER =============
-      - name: 📅 Initialize 30-Day Counter
-        id: day_counter
-        run: |
-          # Get current day from GitHub cache or start at 1
-          if [ "${{ github.event_name }}" == "schedule" ]; then
-            # Try to get from GitHub variables
-            DAY=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              https://api.github.com/repos/${{ github.repository }}/actions/variables/DAY_COUNTER | jq -r .value)
-            
-            if [ "$DAY" == "null" ] || [ -z "$DAY" ]; then
-              DAY=1
-            else
-              DAY=$((DAY + 1))
-            fi
-            
-            # Update counter
-            curl -X PATCH -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Accept: application/vnd.github.v3+json" \
-              https://api.github.com/repos/${{ github.repository }}/actions/variables/DAY_COUNTER \
-              -d "{\"name\":\"DAY_COUNTER\",\"value\":\"$DAY\"}"
-          else
-            DAY=${{ github.event.inputs.duration_days || 1 }}
-          fi
-          
-          # Check if 30 days completed
-          if [ $DAY -gt 30 ]; then
-            echo "✅ 30 DAYS COMPLETED SUCCESSFULLY! 🎉"
-            echo "Resetting counter for next cycle..."
-            curl -X PATCH -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              https://api.github.com/repos/${{ github.repository }}/actions/variables/DAY_COUNTER \
-              -d "{\"name\":\"DAY_COUNTER\",\"value\":\"1\"}"
-            exit 0
-          fi
-          
-          echo "current_day=$DAY" >> $GITHUB_OUTPUT
-          echo "📅 DAY $DAY OF 30"
 
-      # ============= LOCATION SETUP =============
-      - name: 🌏 Set Server Location
-        id: location
-        run: |
-          LOCATION="${{ github.event.inputs.server_location || 'sg' }}"
-          
-          case $LOCATION in
-            sg|"sg (Singapore)")
-              SERVER="Singapore"
-              TIMEZONE="Asia/Singapore"
-              REGION="ap-southeast-1"
-              FLAG="🇸🇬"
-              ;;
-            in|"in (India - Mumbai)")
-              SERVER="India - Mumbai"
-              TIMEZONE="Asia/Kolkata"
-              REGION="ap-south-1"
-              FLAG="🇮🇳"
-              ;;
-            lk|"lk (Lakshadweep/Maldives)")
-              SERVER="Lakshadweep/Maldives"
-              TIMEZONE="Indian/Maldives"
-              REGION="ap-south-1"
-              FLAG="🇲🇻"
-              ;;
-            *)
-              SERVER="Singapore"
-              TIMEZONE="Asia/Singapore"
-              REGION="ap-southeast-1"
-              FLAG="🇸🇬"
-              ;;
-          esac
-          
-          echo "server=$SERVER" >> $GITHUB_OUTPUT
-          echo "flag=$FLAG" >> $GITHUB_OUTPUT
-          echo "region=$REGION" >> $GITHUB_OUTPUT
-          
-          # Set timezone
-          sudo timedatectl set-timezone $TIMEZONE
-          echo "📍 Server Location: $FLAG $SERVER"
-          echo "🕐 Local Time: $(date)"
+    - name: Update system
+      run: |
+        sudo apt update
 
-      # ============= CHECKOUT =============
-      - name: 📥 Checkout Repository
-        uses: actions/checkout@v4
+    - name: Install SSH
+      run: |
+        sudo apt install -y openssh-server curl
+        sudo mkdir -p /var/run/sshd
 
-      # ============= INSTALL BORE.PUB =============
-      - name: 🔧 Install bore.pub (Multiple Methods)
-        id: install_bore
-        run: |
-          echo "📦 Installing bore.pub..."
-          
-          # Method 1: Direct binary download (fastest)
-          echo "Trying direct binary download..."
-          curl -k -L -o bore https://github.com/ekzhang/bore/releases/download/v0.5.0/bore-v0.5.0-x86_64-unknown-linux-musl && chmod +x bore && sudo mv bore /usr/local/bin/ && echo "✅ Method 1 successful" || echo "⚠️ Method 1 failed"
-          
-          # Method 2: Tar archive if binary failed
-          if ! command -v bore &> /dev/null; then
-            echo "Trying tar archive download..."
-            curl -k -L -o bore.tar.gz https://github.com/ekzhang/bore/releases/download/v0.5.0/bore-v0.5.0-x86_64-unknown-linux-musl.tar.gz
-            tar -xzf bore.tar.gz
-            chmod +x bore
-            sudo mv bore /usr/local/bin/
-            rm bore.tar.gz
-            echo "✅ Method 2 successful"
-          fi
-          
-          # Method 3: Cargo install if both above failed
-          if ! command -v bore &> /dev/null; then
-            echo "Trying cargo installation..."
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -k | sh -s -- -y
-            source ~/.cargo/env
-            cargo install bore-cli
-            echo "✅ Method 3 successful"
-          fi
-          
-          # Verify installation
-          if command -v bore &> /dev/null; then
-            echo "✅ bore.pub installed successfully: $(bore --version)"
-          else
-            echo "❌ All installation methods failed"
-            exit 1
-          fi
+    - name: Set runner password
+      run: |
+        echo "runner:12345678" | sudo chpasswd
 
-      # ============= INSTALL SSH SERVER =============
-      - name: 🔐 Install and Configure SSH Server
-        run: |
-          echo "🔧 Installing SSH server..."
-          
-          # Update and install packages
-          sudo apt-get update
-          sudo apt-get install -y openssh-server openssh-client sshpass net-tools curl wget jq
-          
-          # Backup original config
-          sudo cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup
-          
-          # Configure SSH on custom port
-          echo "⚙️ Configuring SSH on port ${{ env.SSH_PORT }}..."
-          sudo sed -i "s/^#Port 22/Port ${{ env.SSH_PORT }}/" /etc/ssh/sshd_config
-          sudo sed -i "s/^Port 22/Port ${{ env.SSH_PORT }}/" /etc/ssh/sshd_config
-          
-          # Enable password authentication
-          sudo sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
-          sudo sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
-          
-          # Allow root login (optional)
-          sudo sed -i 's/^#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
-          
-          # Create user and set password
-          echo "👤 Creating user: ${{ env.RUNNER_USER }}"
-          sudo useradd -m -s /bin/bash ${{ env.RUNNER_USER }} 2>/dev/null || true
-          echo "${{ env.RUNNER_USER }}:${{ env.RUNNER_PASS }}" | sudo chpasswd
-          sudo usermod -aG sudo ${{ env.RUNNER_USER }}
-          
-          # Add explicit port if not present
-          if ! grep -q "^Port ${{ env.SSH_PORT }}" /etc/ssh/sshd_config; then
-            echo "Port ${{ env.SSH_PORT }}" | sudo tee -a /etc/ssh/sshd_config
-          fi
-          
-          # Restart SSH service
-          sudo systemctl restart ssh
-          sleep 5
-          
-          # Verify SSH is running
-          echo "🔍 Verifying SSH on port ${{ env.SSH_PORT }}..."
-          sudo netstat -tlnp | grep ":${{ env.SSH_PORT }}" || sudo ss -tlnp | grep ":${{ env.SSH_PORT }}"
+    - name: Enable password login
+      run: |
+        sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/g' /etc/ssh/sshd_config
+        sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/g' /etc/ssh/sshd_config
+        sudo service ssh restart
 
-      # ============= TEST LOCAL SSH =============
-      - name: 🧪 Test Local SSH Connection
-        run: |
-          echo "🧪 Testing local SSH connection on port ${{ env.SSH_PORT }}..."
-          sleep 10
-          
-          # Multiple connection attempts
-          for i in {1..5}; do
-            echo "Attempt $i/5..."
-            if sshpass -p "${{ env.RUNNER_PASS }}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p ${{ env.SSH_PORT }} ${{ env.RUNNER_USER }}@localhost "echo 'SSH connection successful'"; then
-              echo "✅ SSH test passed on attempt $i"
-              break
-            fi
-            sleep 5
-          done
+    - name: Install bore
+      run: |
+        curl -L https://github.com/ekzhang/bore/releases/latest/download/bore-x86_64-unknown-linux-musl -o bore
+        chmod +x bore
+        sudo mv bore /usr/local/bin/
 
-      # ============= START BORE TUNNEL =============
-      - name: 🚀 Start Bore Tunnel
-        id: tunnel
-        run: |
-          echo "🚀 Starting bore tunnel on port ${{ env.SSH_PORT }}..."
-          
-          # Start tunnel and capture output
-          bore local ${{ env.SSH_PORT }} --to ${{ env.BORE_SERVER }} > bore_output.txt 2>&1 &
-          BORE_PID=$!
-          sleep 15
-          
-          # Display output
-          echo "📋 Bore tunnel output:"
-          cat bore_output.txt
-          
-          # Extract port number
-          if grep -q "listening at ${{ env.BORE_SERVER }}:" bore_output.txt; then
-            PORT=$(grep -oP "listening at ${{ env.BORE_SERVER }}:\K\d+" bore_output.txt)
-          else
-            PORT=$(grep -o "${{ env.BORE_SERVER }}:[0-9]*" bore_output.txt | cut -d':' -f2 | head -1)
-          fi
-          
-          if [ -n "$PORT" ]; then
-            echo "bore_port=$PORT" >> $GITHUB_OUTPUT
-            echo "BORE_PORT=$PORT" >> $GITHUB_ENV
-            echo "✅ Tunnel established: ${{ env.BORE_SERVER }}:$PORT"
-          else
-            echo "⚠️ Could not extract port, using fallback method"
-            # Try alternative method
-            PORT=$(cat bore_output.txt | grep -o '[0-9]\{4,5\}' | head -1)
-            if [ -n "$PORT" ]; then
-              echo "bore_port=$PORT" >> $GITHUB_OUTPUT
-              echo "BORE_PORT=$PORT" >> $GITHUB_ENV
-              echo "✅ Tunnel established (fallback): ${{ env.BORE_SERVER }}:$PORT"
-            else
-              echo "❌ Failed to get tunnel port"
-              exit 1
-            fi
-          fi
-          
-          # Save PID for monitoring
-          echo $BORE_PID > bore.pid
+    - name: Start Bore Tunnel
+      run: |
+        bore local 22 --to bore.pub > bore.log 2>&1 &
+        sleep 5
+        cat bore.log
 
-      # ============= CONNECTION DETAILS =============
-      - name: 📋 Display Connection Information
-        run: |
-          echo "═══════════════════════════════════════════════════════════════"
-          echo "          🚀 30-DAY BORE TUNNEL - DAY ${{ steps.day_counter.outputs.current_day }}/30"
-          echo "═══════════════════════════════════════════════════════════════"
-          echo ""
-          echo "📍 SERVER LOCATION: ${{ steps.location.outputs.flag }} ${{ steps.location.outputs.server }}"
-          echo "📅 DAY: ${{ steps.day_counter.outputs.current_day }} of 30"
-          echo "🕐 LOCAL TIME: $(date)"
-          echo ""
-          echo "🔌 TUNNEL CONNECTION DETAILS:"
-          echo "   • Host: ${{ env.BORE_SERVER }}"
-          echo "   • Port: ${{ steps.tunnel.outputs.bore_port }}"
-          echo "   • Local Port: ${{ env.SSH_PORT }}"
-          echo ""
-          echo "👤 SSH USER CREDENTIALS:"
-          echo "   • Username: ${{ env.RUNNER_USER }}"
-          echo "   • Password: ${{ env.RUNNER_PASS }}"
-          echo "   • Command: ssh -p ${{ env.SSH_PORT }} ${{ env.RUNNER_USER }}@localhost"
-          echo ""
-          echo "🌐 REMOTE ACCESS (via bore.pub):"
-          echo "   • Command: ssh -o ProxyCommand='bore local ${{ env.SSH_PORT }} --to ${{ env.BORE_SERVER }} --port ${{ steps.tunnel.outputs.bore_port }}' ${{ env.RUNNER_USER }}@localhost"
-          echo "   • Or using Termius: bore.pub:${{ steps.tunnel.outputs.bore_port }}"
-          echo ""
-          echo "📊 STATUS: ACTIVE - Day ${{ steps.day_counter.outputs.current_day }}/30"
-          echo "⏱️ SESSION DURATION: 5 hours (until GitHub timeout)"
-          echo "═══════════════════════════════════════════════════════════════"
-          
-          # Save to file for monitoring
-          cat > tunnel_info.txt << EOF
-          DAY=${{ steps.day_counter.outputs.current_day }}
-          SERVER=${{ steps.location.outputs.server }}
-          BORE_PORT=${{ steps.tunnel.outputs.bore_port }}
-          SSH_PORT=${{ env.SSH_PORT }}
-          USER=${{ env.RUNNER_USER }}
-          PASS=${{ env.RUNNER_PASS }}
-          TIMESTAMP=$(date)
-          EOF
+    - name: Show SSH Login
+      run: |
+        echo "=============================="
+        echo "SSH USER: runner"
+        echo "SSH PASSWORD: 12345678"
+        echo "Check above for bore.pub port"
+        echo "Example:"
+        echo "ssh runner@bore.pub -p PORT"
+        echo "=============================="
 
-      # ============= UPLOAD TUNNEL INFO =============
-      - name: 📤 Upload Tunnel Information
-        uses: actions/upload-artifact@v4
-        with:
-          name: tunnel-info-day-${{ steps.day_counter.outputs.current_day }}
-          path: tunnel_info.txt
-          retention-days: 30
-
-      # ============= CONTINUOUS MONITORING =============
-      - name: ⏱️ Keep Tunnel Alive (5 Hours)
-        run: |
-          echo "🔄 Continuous monitoring started for Day ${{ steps.day_counter.outputs.current_day }}/30"
-          echo "📡 Tunnel: ${{ env.BORE_SERVER }}:${{ steps.tunnel.outputs.bore_port }} → localhost:${{ env.SSH_PORT }}"
-          echo "⏱️ Will run for 5 hours (until GitHub timeout)"
-          echo ""
-          
-          # Calculate end time (5 hours = 18000 seconds, but we'll do 4.5 hours to be safe)
-          END_TIME=$(( $(date +%s) + 16200 )) # 4.5 hours
-          
-          # Monitoring loop
-          while [ $(date +%s) -lt $END_TIME ]; do
-            CURRENT_TIME=$(date)
-            REMAINING=$(( (END_TIME - $(date +%s)) / 60 ))
-            
-            echo "[$CURRENT_TIME] ⏱️ $REMAINING minutes remaining"
-            
-            # Check if tunnel is alive
-            if ! pgrep -f "bore local ${{ env.SSH_PORT }}" > /dev/null; then
-              echo "⚠️ Tunnel died, restarting..."
-              bore local ${{ env.SSH_PORT }} --to ${{ env.BORE_SERVER }} > /dev/null 2>&1 &
-            fi
-            
-            # Check SSH
-            if pgrep -f "sshd" > /dev/null; then
-              echo "✅ SSH running"
-            else
-              echo "⚠️ SSH down, restarting..."
-              sudo systemctl restart ssh
-            fi
-            
-            # Test connection every 30 minutes
-            if [ $(( REMAINING % 30 )) -eq 0 ]; then
-              echo "🧪 Testing tunnel connection..."
-              curl -s -o /dev/null -w "HTTP Status: %{http_code}\n" http://${{ env.BORE_SERVER }}:${{ steps.tunnel.outputs.bore_port }} || echo "⚠️ Tunnel test failed"
-            fi
-            
-            echo "---"
-            sleep 300 # Check every 5 minutes
-          done
-          
-          echo "✅ Day ${{ steps.day_counter.outputs.current_day }} completed successfully!"
-
-      # ============= SEND NOTIFICATION =============
-      - name: 📱 Send Telegram Notification
-        if: always() && secrets.TELEGRAM_BOT_TOKEN
-        run: |
-          DAY=${{ steps.day_counter.outputs.current_day }}
-          PORT=${{ steps.tunnel.outputs.bore_port }}
-          SERVER="${{ steps.location.outputs.flag }} ${{ steps.location.outputs.server }}"
-          
-          MESSAGE="✅ *Day $DAY/30 Tunnel Active*%0A"
-          MESSAGE+="📍 Server: $SERVER%0A"
-          MESSAGE+="🔗 bore.pub:$PORT%0A"
-          MESSAGE+="👤 User: ${{ env.RUNNER_USER }}%0A"
-          MESSAGE+="🔑 Pass: ${{ env.RUNNER_PASS }}%0A"
-          MESSAGE+="🕐 Time: $(date)%0A"
-          MESSAGE+="⏱️ Status: Running"
-          
-          curl -s -X POST https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage \
-            -d chat_id=${{ secrets.TELEGRAM_CHAT_ID }} \
-            -d text="$MESSAGE" \
-            -d parse_mode="Markdown"
-
-      # ============= CLEANUP =============
-      - name: 🧹 Cleanup
-        if: always()
-        run: |
-          echo "🧹 Cleaning up..."
-          # Kill bore process
-          if [ -f bore.pid ]; then
-            kill $(cat bore.pid) 2>/dev/null || true
-          fi
-          pkill -f bore || true
-          echo "✅ Cleanup complete"
-
-  # ============= 30-DAY COMPLETION JOB =============
-  completion-notification:
-    name: "🎉 30-Day Completion"
-    runs-on: ubuntu-latest
-    needs: initialize-30day-tunnel
-    if: always() && needs.initialize-30day-tunnel.outputs.current_day == '30'
-    
-    steps:
-      - name: 🎉 30 Days Completed!
-        run: |
-          echo "═══════════════════════════════════════════════════════════════"
-          echo "          🎉🎉🎉 30 DAYS COMPLETED SUCCESSFULLY! 🎉🎉🎉"
-          echo "═══════════════════════════════════════════════════════════════"
-          echo ""
-          echo "📊 FINAL STATISTICS:"
-          echo "   • Total Days: 30"
-          echo "   • Total Hours: 720"
-          echo "   • Location: ${{ needs.initialize-30day-tunnel.outputs.server_location }}"
-          echo "   • Final Port: bore.pub:${{ needs.initialize-30day-tunnel.outputs.bore_port }}"
-          echo ""
-          echo "✅ The tunnel ran continuously for 30 days!"
-          echo "🔄 New cycle will start automatically"
-          echo ""
-          
-      - name: 📱 Send Completion Notification
-        if: secrets.TELEGRAM_BOT_TOKEN
-        run: |
-          MESSAGE="🎉 *30-DAY TUNNEL COMPLETED!* 🎉%0A"
-          MESSAGE+="📍 Location: ${{ needs.initialize-30day-tunnel.outputs.server_location }}%0A"
-          MESSAGE+="📅 Duration: 30 Days%0A"
-          MESSAGE+="✅ Status: Successful%0A"
-          MESSAGE+="🔄 New cycle starting soon"
-          
-          curl -s -X POST https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage \
-            -d chat_id=${{ secrets.TELEGRAM_CHAT_ID }} \
-            -d text="$MESSAGE" \
-            -d parse_mode="Markdown"
+    - name: Keep VPS Alive
+      run: |
+        sleep 6h
